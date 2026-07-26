@@ -129,6 +129,11 @@ class ServerTab(QWidget):
             row.addWidget(url_label, 1)
 
             if label == "Web Interface":
+                self.lan_check = QCheckBox("LAN")
+                self.lan_check.setToolTip("Allow access from local network (binds to 0.0.0.0 instead of 127.0.0.1).\nRequires server restart.")
+                self.lan_check.setChecked(self.config.get("host", "127.0.0.1") == "0.0.0.0")
+                self.lan_check.toggled.connect(self._on_lan_toggled)
+                row.addWidget(self.lan_check, 0)
                 port_label = QLabel("Port:")
                 row.addWidget(port_label, 0)
                 self.port_spin = QSpinBox()
@@ -481,3 +486,15 @@ class ServerTab(QWidget):
         self.config.set("port", port)
         self.config.save()
         self.port_label.setText(f"Port: {port}")
+
+    def _on_lan_toggled(self, enabled: bool):
+        """Active/désactive l'accès réseau local."""
+        host = "0.0.0.0" if enabled else "127.0.0.1"
+        self.config.set("host", host)
+        self.config.save()
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Server restart required",
+            f"LAN access {'enabled' if enabled else 'disabled'}.\n"
+            "Restart the server for the change to take effect."
+        )

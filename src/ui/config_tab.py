@@ -39,7 +39,7 @@ class ConfigTab(QWidget):
         self.model_path_input = QLineEdit()
         self.model_path_input.setPlaceholderText("Path to .gguf file...")
         self.model_path_input.setMinimumHeight(36)
-        self.model_path_input.setToolTip("Chemin vers le fichier .gguf principal du modèle")
+        self.model_path_input.setToolTip("Path to the main .gguf model file")
         model_grid.addWidget(self.model_path_input, 0, 1)
         self.browse_model_btn = QPushButton("📂 Browse")
         self.browse_model_btn.setMinimumHeight(36)
@@ -52,9 +52,9 @@ class ConfigTab(QWidget):
         self.mtp_path_input = QLineEdit()
         self.mtp_path_input.setPlaceholderText("MTP .gguf file (optional)...")
         self.mtp_path_input.setMinimumHeight(36)
-        self.mtp_path_input.setToolTip("Fichier .gguf compagnon MTP (décodage spéculatif)\n"
-            "Optionnel — laisser VIDE si le modèle principal contient déjà MTP (auto-spéculatif)\n"
-            "Le mmproj-F32.gguf est un fichier CLIP vision, PAS un modèle MTP")
+        self.mtp_path_input.setToolTip("MTP companion .gguf file (speculative decoding)\n"
+            "Optional — leave EMPTY if the main model already contains MTP (self-speculative)\n"
+            "mmproj-F32.gguf is a CLIP vision file, NOT an MTP model")
         model_grid.addWidget(self.mtp_path_input, 1, 1)
         self.browse_mtp_btn = QPushButton("📂 Browse")
         self.browse_mtp_btn.setMinimumHeight(36)
@@ -66,8 +66,8 @@ class ConfigTab(QWidget):
         self.mmproj_path_input = QLineEdit()
         self.mmproj_path_input.setPlaceholderText("mmproj .gguf file (optional, for vision)...")
         self.mmproj_path_input.setMinimumHeight(36)
-        self.mmproj_path_input.setToolTip("Fichier mmproj-F32.gguf pour les capacités vision/multimodales\n"
-            "Optionnel — uniquement si le modèle supporte les images")
+        self.mmproj_path_input.setToolTip("mmproj-F32.gguf file for vision/multimodal capabilities\n"
+            "Optional — only if the model supports images")
         model_grid.addWidget(self.mmproj_path_input, 2, 1)
         self.browse_mmproj_btn = QPushButton("📂 Browse")
         self.browse_mmproj_btn.setMinimumHeight(36)
@@ -92,15 +92,15 @@ class ConfigTab(QWidget):
 
         # Row 0
         backend_label = QLabel("Backend:")
-        backend_label.setToolTip("Backend GPU à utiliser\nVulkan0 = recommandé sur Strix Halo (le plus rapide)\nROCm0 = backend HIP/ROCm")
+        backend_label.setToolTip("GPU backend to use\nVulkan0 = recommended on Strix Halo (fastest)\nROCm0 = HIP/ROCm backend")
         perf_grid.addWidget(backend_label, 0, 0)
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(["Vulkan0", "ROCm0"])
-        self.backend_combo.setToolTip("Vulkan0 : recommandé (testé plus rapide sur Strix Halo)\nROCm0 : backend HIP/ROCm alternatif")
+        self.backend_combo.setToolTip("Vulkan0: recommended (tested faster on Strix Halo)\nROCm0: alternative HIP/ROCm backend")
         perf_grid.addWidget(self.backend_combo, 0, 1)
 
         ctx_label = QLabel("Context:")
-        ctx_label.setToolTip("Taille du contexte en tokens (-c)\nTaille mémoire = contexte × ~2 Mo par token\n32768 = ~8 GB VRAM")
+        ctx_label.setToolTip("Context size in tokens (-c)\nMemory = context × ~2 MB per token\n32768 = ~8 GB VRAM")
         perf_grid.addWidget(ctx_label, 0, 2)
 
         # Slider + saisie manuelle pour le contexte
@@ -179,17 +179,17 @@ class ConfigTab(QWidget):
 
         # Row 2
         gpu_layers_label = QLabel("GPU Layers:")
-        gpu_layers_label.setToolTip("Nombre de couches du modèle à décharger sur le GPU (-ngl)\n999 = toutes les couches sur GPU")
+        gpu_layers_label.setToolTip("Number of model layers to offload to GPU (-ngl)\n999 = all layers on GPU")
         perf_grid.addWidget(gpu_layers_label, 2, 0)
         self.gpu_layers_spin = QSpinBox()
         self.gpu_layers_spin.setRange(1, 999)
         self.gpu_layers_spin.setValue(999)
-        self.gpu_layers_spin.setToolTip("999 = toutes les couches sur GPU\n0 = CPU uniquement\nÀ ajuster si mémoire GPU insuffisante")
+        self.gpu_layers_spin.setToolTip("999 = all layers on GPU\n0 = CPU only\nAdjust if GPU memory is insufficient")
         perf_grid.addWidget(self.gpu_layers_spin, 2, 1)
 
         self.flash_attn_check = QCheckBox("Flash Attention")
         self.flash_attn_check.setChecked(True)
-        self.flash_attn_check.setToolTip("Attention flash memory (-fa)\nRéduit l'utilisation mémoire du contexte\nRecommandé : activé")
+        self.flash_attn_check.setToolTip("Flash attention memory (-fa)\nReduces context memory usage\nRecommended: enabled")
         perf_grid.addWidget(self.flash_attn_check, 2, 2)
 
         # Parallel dans un sous-layout horizontal
@@ -279,8 +279,8 @@ class ConfigTab(QWidget):
 
 
 
-        # === Arguments avancés ===
-        adv_group = QGroupBox("🔧 Advanced arguments (optional)")
+        # === Advanced arguments ===
+        adv_group = QGroupBox("Advanced arguments (optional)")
         adv_layout = QVBoxLayout(adv_group)
         self.adv_args_input = QLineEdit()
         self.adv_args_input.setPlaceholderText("e.g. --no-mmap --cont-batching ...")
@@ -334,16 +334,16 @@ class ConfigTab(QWidget):
         self._load_model_args()
 
     def _load_model_args(self):
-        """Charge les arguments avancés spécifiques au modèle sélectionné."""
+        """Load model-specific advanced arguments."""
         model_path = self.model_path_input.text().strip()
         if model_path:
             args = self.config.get_model_args(model_path)
             model_name = Path(model_path).name
             if self.config._data.get("model_advanced_args", {}).get(model_name):
-                self.adv_args_label.setText(f"⚡ Arguments spécifiques à {model_name}")
+                self.adv_args_label.setText(f"Model-specific arguments for {model_name}")
                 self.adv_args_label.setStyleSheet("font-size: 11px; color: #e94560;")
             else:
-                self.adv_args_label.setText("Arguments globaux (appliqués à tous les modèles)")
+                self.adv_args_label.setText("Global arguments (applied to all models)")
                 self.adv_args_label.setStyleSheet("font-size: 11px; color: #888;")
             self.adv_args_input.setText(args)
         else:
