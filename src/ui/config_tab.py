@@ -1,0 +1,422 @@
+"""Onglet Configuration : paramètres du serveur et lancement."""
+
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
+    QPushButton, QSpinBox, QComboBox, QCheckBox, QSlider,
+    QLineEdit, QFileDialog, QGridLayout, QTextEdit, QMessageBox
+)
+from PySide6.QtCore import Qt, QTimer
+
+from src.utils.config import Config
+from src.core.server_controller import ServerController
+
+
+class ConfigTab(QWidget):
+    """Configuration du serveur llama-server."""
+
+    def __init__(self, config: Config, server: ServerController):
+        super().__init__()
+        self.config = config
+        self.server = server
+        self._setup_ui()
+        self._load_config()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        # === Modèle ===
+        model_group = QGroupBox("📦 Model")
+        model_grid = QGridLayout(model_group)
+        model_grid.setSpacing(10)
+        model_grid.setContentsMargins(4, 4, 4, 4)
+        model_grid.setColumnStretch(1, 1)  # le champ texte prend tout l'espace
+
+        model_grid.addWidget(QLabel("GGUF File:"), 0, 0)
+        self.model_path_input = QLineEdit()
+        self.model_path_input.setPlaceholderText("Path to .gguf file...")
+        self.model_path_input.setMinimumHeight(36)
+        self.model_path_input.setToolTip("Chemin vers le fichier .gguf principal du modèle")
+        model_grid.addWidget(self.model_path_input, 0, 1)
+        self.browse_model_btn = QPushButton("📂 Browse")
+        self.browse_model_btn.setMinimumHeight(36)
+        self.browse_model_btn.setMinimumWidth(100)
+        self.browse_model_btn.clicked.connect(self._browse_model)
+        self.model_path_input.textChanged.connect(self._load_model_args)
+        model_grid.addWidget(self.browse_model_btn, 0, 2)
+
+        model_grid.addWidget(QLabel("MTP Companion:"), 1, 0)
+        self.mtp_path_input = QLineEdit()
+        self.mtp_path_input.setPlaceholderText("MTP .gguf file (optional)...")
+        self.mtp_path_input.setMinimumHeight(36)
+        self.mtp_path_input.setToolTip("Fichier .gguf compagnon MTP (décodage spéculatif)\n"
+            "Optionnel — laisser VIDE si le modèle principal contient déjà MTP (auto-spéculatif)\n"
+            "Le mmproj-F32.gguf est un fichier CLIP vision, PAS un modèle MTP")
+        model_grid.addWidget(self.mtp_path_input, 1, 1)
+        self.browse_mtp_btn = QPushButton("📂 Browse")
+        self.browse_mtp_btn.setMinimumHeight(36)
+        self.browse_mtp_btn.setMinimumWidth(100)
+        self.browse_mtp_btn.clicked.connect(self._browse_mtp)
+        model_grid.addWidget(self.browse_mtp_btn, 1, 2)
+
+        model_grid.addWidget(QLabel("Vision Model:"), 2, 0)
+        self.mmproj_path_input = QLineEdit()
+        self.mmproj_path_input.setPlaceholderText("mmproj .gguf file (optional, for vision)...")
+        self.mmproj_path_input.setMinimumHeight(36)
+        self.mmproj_path_input.setToolTip("Fichier mmproj-F32.gguf pour les capacités vision/multimodales\n"
+            "Optionnel — uniquement si le modèle supporte les images")
+        model_grid.addWidget(self.mmproj_path_input, 2, 1)
+        self.browse_mmproj_btn = QPushButton("📂 Browse")
+        self.browse_mmproj_btn.setMinimumHeight(36)
+        self.browse_mmproj_btn.setMinimumWidth(100)
+        self.browse_mmproj_btn.clicked.connect(self._browse_mmproj)
+        model_grid.addWidget(self.browse_mmproj_btn, 2, 2)
+
+        model_grid.addWidget(QLabel("Models folder:"), 3, 0)
+        self.models_folder_label = QLabel(str(self.config.models_path))
+        self.models_folder_label.setStyleSheet("font-family: monospace;")
+        model_grid.addWidget(self.models_folder_label, 3, 1, 1, 2)
+
+        layout.addWidget(model_group)
+
+        # === Performance ===
+        perf_group = QGroupBox("⚡ Performance")
+        perf_grid = QGridLayout(perf_group)
+        perf_grid.setSpacing(8)
+        perf_grid.setContentsMargins(10, 16, 10, 10)
+        perf_grid.setColumnStretch(1, 1)
+        perf_grid.setColumnStretch(3, 1)
+
+        # Row 0
+        backend_label = QLabel("Backend:")
+        backend_label.setToolTip("Backend GPU à utiliser\nVulkan0 = recommandé sur Strix Halo (le plus rapide)\nROCm0 = backend HIP/ROCm")
+        perf_grid.addWidget(backend_label, 0, 0)
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["Vulkan0", "ROCm0"])
+        self.backend_combo.setToolTip("Vulkan0 : recommandé (testé plus rapide sur Strix Halo)\nROCm0 : backend HIP/ROCm alternatif")
+        perf_grid.addWidget(self.backend_combo, 0, 1)
+
+        ctx_label = QLabel("Context:")
+        ctx_label.setToolTip("Taille du contexte en tokens (-c)\nTaille mémoire = contexte × ~2 Mo par token\n32768 = ~8 GB VRAM")
+        perf_grid.addWidget(ctx_label, 0, 2)
+
+        # Slider + saisie manuelle pour le contexte
+        ctx_widget = QWidget()
+        ctx_row = QHBoxLayout(ctx_widget)
+        ctx_row.setContentsMargins(0, 0, 0, 0)
+        ctx_row.setSpacing(6)
+
+        self.ctx_slider = QSlider(Qt.Horizontal)
+        self.ctx_slider.setRange(0, 3)
+        self.ctx_slider.setTickPosition(QSlider.TicksBelow)
+        self.ctx_slider.setTickInterval(1)
+        self.ctx_slider.setFixedWidth(180)
+        ctx_row.addWidget(self.ctx_slider)
+
+        self.ctx_input = QLineEdit()
+        self.ctx_input.setPlaceholderText("32768")
+        self.ctx_input.setFixedWidth(100)
+        self.ctx_input.setAlignment(Qt.AlignRight)
+        self.ctx_input.setToolTip("Taille du contexte (-c) en tokens\n32k / 64k / 128k / 200k\nOu saisissez une valeur personnalisée")
+        ctx_row.addWidget(self.ctx_input)
+
+        ctx_row.addWidget(QLabel("tokens"))
+        ctx_row.addStretch()
+        perf_grid.addWidget(ctx_widget, 0, 3)
+
+        # Mapping slider ↔ valeurs
+        self._ctx_steps = [32768, 65536, 131072, 204800]
+        self._ctx_labels = ["32k", "64k", "128k", "200k"]
+
+        def _ctx_slider_changed(pos):
+            val = self._ctx_steps[pos]
+            self.ctx_input.setText(str(val))
+
+        def _ctx_text_changed():
+            txt = self.ctx_input.text().strip()
+            if not txt:
+                return
+            try:
+                val = int(txt)
+                # Trouver le step le plus proche
+                closest = min(range(len(self._ctx_steps)),
+                              key=lambda i: abs(self._ctx_steps[i] - val))
+                self.ctx_slider.blockSignals(True)
+                self.ctx_slider.setValue(closest)
+                self.ctx_slider.blockSignals(False)
+            except ValueError:
+                pass
+
+        self.ctx_slider.valueChanged.connect(_ctx_slider_changed)
+        self.ctx_input.textChanged.connect(_ctx_text_changed)
+
+        # Valeur initiale
+        self.ctx_slider.setValue(0)  # 32k
+
+        # Row 1
+        batch_label = QLabel("Batch:")
+        batch_label.setToolTip("Taille du batch pour le traitement des prompts (-b)\nValeur élevée = préremplissage plus rapide")
+        perf_grid.addWidget(batch_label, 1, 0)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(128, 16384)
+        self.batch_spin.setSingleStep(128)
+        self.batch_spin.setValue(2048)
+        self.batch_spin.setToolTip("Taille de batch (-b) pour le traitement du prompt")
+        perf_grid.addWidget(self.batch_spin, 1, 1)
+
+        ubatch_label = QLabel("Ubatch:")
+        ubatch_label.setToolTip("Taille du batch physique pour les calculs GPU (-ub)\nGénéralement moitié du batch principal")
+        perf_grid.addWidget(ubatch_label, 1, 2)
+        self.ubatch_spin = QSpinBox()
+        self.ubatch_spin.setRange(64, 16384)
+        self.ubatch_spin.setSingleStep(64)
+        self.ubatch_spin.setValue(1024)
+        self.ubatch_spin.setToolTip("Taille de batch physique GPU (-ub)")
+        perf_grid.addWidget(self.ubatch_spin, 1, 3)
+
+        # Row 2
+        gpu_layers_label = QLabel("GPU Layers:")
+        gpu_layers_label.setToolTip("Nombre de couches du modèle à décharger sur le GPU (-ngl)\n999 = toutes les couches sur GPU")
+        perf_grid.addWidget(gpu_layers_label, 2, 0)
+        self.gpu_layers_spin = QSpinBox()
+        self.gpu_layers_spin.setRange(1, 999)
+        self.gpu_layers_spin.setValue(999)
+        self.gpu_layers_spin.setToolTip("999 = toutes les couches sur GPU\n0 = CPU uniquement\nÀ ajuster si mémoire GPU insuffisante")
+        perf_grid.addWidget(self.gpu_layers_spin, 2, 1)
+
+        self.flash_attn_check = QCheckBox("Flash Attention")
+        self.flash_attn_check.setChecked(True)
+        self.flash_attn_check.setToolTip("Attention flash memory (-fa)\nRéduit l'utilisation mémoire du contexte\nRecommandé : activé")
+        perf_grid.addWidget(self.flash_attn_check, 2, 2)
+
+        # Parallel dans un sous-layout horizontal
+        parallel_widget = QWidget()
+        parallel_layout = QHBoxLayout(parallel_widget)
+        parallel_layout.setContentsMargins(0, 0, 0, 0)
+        parallel_layout.setSpacing(6)
+        parallel_layout.addWidget(QLabel("Parallel:"))
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 8)
+        self.parallel_spin.setValue(1)
+        parallel_layout.addWidget(self.parallel_spin)
+        parallel_layout.addStretch()
+        perf_grid.addWidget(parallel_widget, 2, 3)
+
+        layout.addWidget(perf_group)
+
+        # === Cache ===
+        cache_group = QGroupBox("💾 K/V Cache")
+        cache_grid = QHBoxLayout(cache_group)
+        cache_grid.setSpacing(12)
+        cache_grid.setContentsMargins(10, 16, 10, 10)
+
+        cache_grid.addWidget(QLabel("Cache K:"))
+        self.cache_k_combo = QComboBox()
+        self.cache_k_combo.addItems(["q8_0", "q4_0", "q6_0", "turbo4", "turbo3", "f16"])
+        self.cache_k_combo.setCurrentText("q8_0")
+        self.cache_k_combo.setFixedWidth(140)
+        cache_grid.addWidget(self.cache_k_combo)
+
+        cache_grid.addSpacing(20)
+
+        cache_grid.addWidget(QLabel("Cache V:"))
+        self.cache_v_combo = QComboBox()
+        self.cache_v_combo.addItems(["q8_0", "q4_0", "q6_0", "turbo4", "turbo3", "f16"])
+        self.cache_v_combo.setCurrentText("q8_0")
+        self.cache_v_combo.setFixedWidth(140)
+        cache_grid.addWidget(self.cache_v_combo)
+
+        cache_grid.addStretch()
+
+        layout.addWidget(cache_group)
+
+        # === MTP Speculative Decoding ===
+        mtp_group = QGroupBox("🚀 MTP Speculative Decoding")
+        mtp_layout = QVBoxLayout(mtp_group)
+        mtp_layout.setSpacing(8)
+        mtp_layout.setContentsMargins(10, 16, 10, 10)
+
+        self.mtp_check = QCheckBox("Enable MTP (self-speculative decoding)")
+        mtp_layout.addWidget(self.mtp_check)
+
+        mtp_grid = QHBoxLayout()
+        mtp_grid.setSpacing(8)
+
+        mtp_grid.addWidget(QLabel("n-max:"))
+        self.mtp_nmax_spin = QSpinBox()
+        self.mtp_nmax_spin.setRange(1, 6)
+        self.mtp_nmax_spin.setValue(4)
+        self.mtp_nmax_spin.setFixedWidth(80)
+        mtp_grid.addWidget(self.mtp_nmax_spin)
+
+        mtp_grid.addSpacing(16)
+
+        mtp_grid.addWidget(QLabel("p-min:"))
+        self.mtp_pmin_spin = QSpinBox()
+        self.mtp_pmin_spin.setRange(5, 100)
+        self.mtp_pmin_spin.setValue(55)
+        self.mtp_pmin_spin.setSuffix("%")
+        self.mtp_pmin_spin.setFixedWidth(80)
+        mtp_grid.addWidget(self.mtp_pmin_spin)
+
+        mtp_grid.addSpacing(16)
+
+        mtp_grid.addWidget(QLabel("p-split:"))
+        self.mtp_psplit_spin = QSpinBox()
+        self.mtp_psplit_spin.setRange(1, 100)
+        self.mtp_psplit_spin.setValue(10)
+        self.mtp_psplit_spin.setSuffix("%")
+        self.mtp_psplit_spin.setFixedWidth(80)
+        mtp_grid.addWidget(self.mtp_psplit_spin)
+
+        mtp_grid.addStretch()
+
+        mtp_layout.addLayout(mtp_grid)
+        layout.addWidget(mtp_group)
+
+
+
+        # === Arguments avancés ===
+        adv_group = QGroupBox("🔧 Advanced arguments (optional)")
+        adv_layout = QVBoxLayout(adv_group)
+        self.adv_args_input = QLineEdit()
+        self.adv_args_input.setPlaceholderText("e.g. --no-mmap --cont-batching ...")
+        adv_layout.addWidget(self.adv_args_input)
+
+        # Label pour indiquer si les args sont spécifiques au modèle
+        self.adv_args_label = QLabel("")
+        self.adv_args_label.setStyleSheet("font-size: 11px; color: #888;")
+        adv_layout.addWidget(self.adv_args_label)
+        layout.addWidget(adv_group)
+
+        # === Boutons ===
+        btn_layout = QHBoxLayout()
+        self.save_btn = QPushButton("💾 Save configuration")
+        self.save_btn.setMinimumHeight(38)
+        self.save_btn.setStyleSheet("QPushButton { text-align: center; }")
+        self.save_btn.clicked.connect(self._save_config)
+        btn_layout.addWidget(self.save_btn)
+
+        self.reset_btn = QPushButton("↩️ Reset")
+        self.reset_btn.setMinimumHeight(38)
+        self.reset_btn.setStyleSheet("QPushButton { text-align: center; }")
+        self.reset_btn.clicked.connect(self._reset_config)
+        btn_layout.addWidget(self.reset_btn)
+
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        layout.addStretch()
+
+    def _load_config(self):
+        model_path = self.config.get("last_model", "")
+        self.model_path_input.setText(model_path)
+        self.mtp_path_input.setText(self.config.get("last_mtp_model", ""))
+        self.mmproj_path_input.setText(self.config.get("last_mmproj_model", ""))
+        self.backend_combo.setCurrentText(self.config.get("backend", "Vulkan0"))
+        self.ctx_input.setText(str(int(self.config.get("context_size", 32768))))
+        self.batch_spin.setValue(int(self.config.get("batch_size", 2048)))
+        self.ubatch_spin.setValue(int(self.config.get("ubatch_size", 1024)))
+        self.gpu_layers_spin.setValue(int(self.config.get("gpu_layers", 999)))
+        self.flash_attn_check.setChecked(self.config.get("flash_attn", True))
+        self.parallel_spin.setValue(int(self.config.get("parallel", 1)))
+        self.cache_k_combo.setCurrentText(self.config.get("cache_type_k", "q8_0"))
+        self.cache_v_combo.setCurrentText(self.config.get("cache_type_v", "q8_0"))
+        self.mtp_check.setChecked(self.config.get("mtp_enabled", False))
+        self.mtp_nmax_spin.setValue(int(self.config.get("mtp_n_max", 4)))
+        self.mtp_pmin_spin.setValue(int(self.config.get("mtp_p_min", 0.55) * 100))
+        self.mtp_psplit_spin.setValue(int(self.config.get("mtp_p_split", 0.10) * 100))
+        self.models_folder_label.setText(str(self.config.models_path))
+
+        # Charger les args spécifiques au modèle
+        self._load_model_args()
+
+    def _load_model_args(self):
+        """Charge les arguments avancés spécifiques au modèle sélectionné."""
+        model_path = self.model_path_input.text().strip()
+        if model_path:
+            args = self.config.get_model_args(model_path)
+            model_name = Path(model_path).name
+            if self.config._data.get("model_advanced_args", {}).get(model_name):
+                self.adv_args_label.setText(f"⚡ Arguments spécifiques à {model_name}")
+                self.adv_args_label.setStyleSheet("font-size: 11px; color: #e94560;")
+            else:
+                self.adv_args_label.setText("Arguments globaux (appliqués à tous les modèles)")
+                self.adv_args_label.setStyleSheet("font-size: 11px; color: #888;")
+            self.adv_args_input.setText(args)
+        else:
+            self.adv_args_input.setText(self.config.get("advanced_args", ""))
+            self.adv_args_label.setText("")
+
+    def _save_config(self):
+        model_path = self.model_path_input.text().strip()
+        self.config.set("last_model", model_path)
+        self.config.set("last_mtp_model", self.mtp_path_input.text())
+        self.config.set("last_mmproj_model", self.mmproj_path_input.text())
+        self.config.set("backend", self.backend_combo.currentText())
+        raw = self.ctx_input.text().strip()
+        try:
+            self.config.set("context_size", int(raw))
+        except ValueError:
+            self.config.set("context_size", 32768)
+        self.config.set("batch_size", self.batch_spin.value())
+        self.config.set("ubatch_size", self.ubatch_spin.value())
+        self.config.set("gpu_layers", self.gpu_layers_spin.value())
+        self.config.set("flash_attn", self.flash_attn_check.isChecked())
+        self.config.set("parallel", self.parallel_spin.value())
+        self.config.set("cache_type_k", self.cache_k_combo.currentText())
+        self.config.set("cache_type_v", self.cache_v_combo.currentText())
+        self.config.set("mtp_enabled", self.mtp_check.isChecked())
+        self.config.set("mtp_n_max", self.mtp_nmax_spin.value())
+        self.config.set("mtp_p_min", self.mtp_pmin_spin.value() / 100.0)
+        self.config.set("mtp_p_split", self.mtp_psplit_spin.value() / 100.0)
+
+        # Sauvegarder les args spécifiques au modèle si un modèle est sélectionné
+        args = self.adv_args_input.text()
+        if model_path:
+            self.config.set_model_args(model_path, args)
+        else:
+            self.config.set("advanced_args", args)
+        self.config.save()
+
+        # Mettre à jour le label
+        self._load_model_args()
+
+        QMessageBox.information(self, "Configuration", "Configuration saved ✓")
+
+    def _reset_config(self):
+        from src.utils.config import Config as Cfg
+        temp = Cfg()
+        for k, v in temp._data.items():
+            self.config.set(k, v)
+        self._load_config()
+        QMessageBox.information(self, "Configuration", "Configuration reset ✓")
+
+    def _browse_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a GGUF model",
+            str(self.config.models_path),
+            "GGUF Files (*.gguf);;All Files (*)"
+        )
+        if path:
+            self.model_path_input.setText(path)
+
+    def _browse_mtp(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select MTP companion",
+            str(self.config.models_path),
+            "GGUF Files (*.gguf);;All Files (*)"
+        )
+        if path:
+            self.mtp_path_input.setText(path)
+
+    def _browse_mmproj(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Vision model (mmproj)",
+            str(self.config.models_path),
+            "GGUF Files (*.gguf);;All Files (*)"
+        )
+        if path:
+            self.mmproj_path_input.setText(path)

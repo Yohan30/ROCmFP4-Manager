@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+venv/
+.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models & large files
+*.gguf
+models/
+
+# Config utilisateur (contient des clés API)
+settings.json
+*.conf
+
+# Logs
+*.log
+
+# ROCmFPX
+ROCMFPX/
+build-strix-rocmfp4/
