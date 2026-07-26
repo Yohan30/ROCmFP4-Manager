@@ -2,6 +2,8 @@
 
 Desktop GUI to **download, configure and run** GGUF models in **ROCmFP4** format on **AMD Strix Halo** — without touching the command line.
 
+![ROCmFP4 Manager](assets/icon.svg)
+
 ## Features
 
 - **Model management** — HuggingFace search & download, LM Studio import, multi-part and MTP support
