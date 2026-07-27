@@ -13,6 +13,7 @@ from PySide6.QtGui import QFont, QPixmap, QPainter
 
 from src.core.server_controller import ServerController
 from src.utils.config import Config
+from src.utils.i18n import _
 
 
 class ServerTab(QWidget):
@@ -84,7 +85,7 @@ class ServerTab(QWidget):
         self.mem_label = QLabel("Memory: —")
         status_grid.addWidget(self.mem_label, 1, 3)
 
-        self.api_mode_label = QLabel("API: —")
+        self.api_mode_label = QLabel(_("api_mode_label") + ": —")
         status_grid.addWidget(self.api_mode_label, 1, 4)
 
         self.model_label = QLabel("Model: —")
@@ -137,12 +138,19 @@ class ServerTab(QWidget):
 
             if label == "Web Interface":
                 # Sélecteur de mode API (Chat Completions / Responses)
-                mode_label = QLabel("Mode serveur:")
+                mode_label = QLabel(_("api_mode") + ":")
                 row.addWidget(mode_label, 0)
                 self.api_mode_combo = QComboBox()
                 self.api_mode_combo.addItem("Chat Completions", "chat_completions")
                 self.api_mode_combo.addItem("Responses", "responses")
-                self.api_mode_combo.setToolTip("Select API mode.\nChat Completions: classic /v1/chat/completions endpoint.\nResponses: modern /v1/responses endpoint (requires adapter).")
+                self.api_mode_combo.setToolTip(
+                    "Select API mode.\n"
+                    "Chat Completions: classic /v1/chat/completions endpoint.\n"
+                    "Responses: modern /v1/responses endpoint (requires adapter).\n\n"
+                    "Sélectionnez le mode API.\n"
+                    "Chat Completions: endpoint classique /v1/chat/completions.\n"
+                    "Responses: endpoint moderne /v1/responses (nécessite l'adaptateur)."
+                )
                 current_mode = self.config.get("api_mode", "chat_completions")
                 idx = self.api_mode_combo.findData(current_mode)
                 if idx >= 0:
@@ -338,7 +346,7 @@ class ServerTab(QWidget):
             self.tps_label.setText("Tokens/s: —")
             self.mem_label.setText("Memory: —")
             self.model_label.setText("Model: —")
-            self.api_mode_label.setText("API: —")
+            self.api_mode_label.setText(_("api_mode_label") + ": —")
         elif event == "adapter_started":
             self._refresh_api_mode_label()
         elif event == "adapter_stopped":
@@ -405,9 +413,9 @@ class ServerTab(QWidget):
         if mode == "responses":
             adapter_on = self.server.adapter_running
             status = "🔄" if adapter_on else "⏸️"
-            self.api_mode_label.setText(f"API: Responses {status}")
+            self.api_mode_label.setText(f"{_('api_mode_responses')} {status}")
         else:
-            self.api_mode_label.setText("API: Chat Completions")
+            self.api_mode_label.setText(_("api_mode_chat"))
 
     def _on_api_key_text_changed(self, text):
         self.config.set("api_key", text)

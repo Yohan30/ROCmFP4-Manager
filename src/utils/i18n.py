@@ -66,6 +66,10 @@ class I18n:
             # --- Port / API ---
             "port": {"en": "Port", "fr": "Port"},
             "api_endpoints": {"en": "API Endpoints", "fr": "Endpoints API"},
+            "api_mode": {"en": "Server mode", "fr": "Mode serveur"},
+            "api_mode_label": {"en": "API", "fr": "API"},
+            "api_mode_chat": {"en": "API: Chat Completions", "fr": "API: Chat Completions"},
+            "api_mode_responses": {"en": "API: Responses", "fr": "API: Responses"},
             "api_key": {"en": "API Key", "fr": "Clé API"},
             "api_key_disabled": {"en": "Disabled", "fr": "Désactivée"},
             "api_key_generate": {"en": "Generate", "fr": "Générer"},
