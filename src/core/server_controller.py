@@ -10,6 +10,7 @@ from typing import Optional, Callable
 
 from src.utils.config import Config
 from src.utils.process_utils import ProcessManager
+from src.core.responses_adapter import ResponsesAdapter
 
 
 class ServerController:
@@ -25,6 +26,10 @@ class ServerController:
         self._tokens_per_sec = 0.0
         self._model_name = ""
         self._start_time: Optional[float] = None
+
+        # Adaptateur Responses API (port dédié)
+        self._adapter_port = 1413
+        self._adapter: Optional[ResponsesAdapter] = None
 
         # Détecter un serveur déjà en cours au démarrage
         self._detect_existing_server()
@@ -165,6 +170,23 @@ class ServerController:
     def api_health_url(self) -> str:
         return self.config.api_health_url
 
+    @property
+    def api_responses_url(self) -> str:
+        """URL de l'endpoint Responses API (via l'adaptateur)."""
+        return f"http://127.0.0.1:{self._adapter_port}/v1/responses"
+
+    @property
+    def adapter_running(self) -> bool:
+        """Indique si l'adaptateur Responses est actif."""
+        return self._adapter is not None and self._adapter.is_running
+
+    @property
+    def adapter_logs(self) -> list[str]:
+        """Logs de l'adaptateur Responses."""
+        if self._adapter:
+            return self._adapter.logs
+        return []
+
     def add_listener(self, callback: Callable):
         """Ajoute un callback appelé sur changement d'état ou nouveau log."""
         self._listeners.append(callback)
@@ -233,6 +255,11 @@ class ServerController:
             self._running = True
             self._start_monitoring(log_file)
             self._notify("started", {"model": self._model_name, "pid": self.pid})
+
+            # Démarrer l'adaptateur Responses si le mode est activé
+            if self.config.get("api_mode", "chat_completions") == "responses":
+                threading.Timer(2.0, self.start_adapter).start()
+
         return success
 
     def _start_monitoring(self, log_file: Path):
@@ -279,8 +306,9 @@ class ServerController:
         self._monitor_thread.start()
 
     def stop(self):
-        """Arrête le serveur."""
+        """Arrête le serveur et l'adaptateur Responses."""
         self._running = False
+        self._stop_adapter()
         self._proc.stop()
         self._notify("stopped", None)
 
@@ -299,3 +327,28 @@ class ServerController:
         if h > 0:
             return f"{h}h {m}m"
         return f"{m}m {s}s"
+
+    # ------------------------------------------------------------------
+    # Adaptateur Responses API
+    # ------------------------------------------------------------------
+
+    def start_adapter(self):
+        """Démarre l'adaptateur Responses API (proxy vers Chat Completions)."""
+        if self._adapter and self._adapter.is_running:
+            return
+
+        api_key = self.config.get("api_key", "") if self.config.get("api_key_enabled", False) else ""
+        self._adapter = ResponsesAdapter(
+            chat_url=self.config.api_chat_url,
+            api_key=api_key,
+            port=self._adapter_port,
+        )
+        self._adapter.start()
+        self._notify("adapter_started", {"port": self._adapter_port})
+
+    def _stop_adapter(self):
+        """Arrête l'adaptateur Responses API."""
+        if self._adapter and self._adapter.is_running:
+            self._adapter.stop()
+            self._adapter = None
+            self._notify("adapter_stopped", None)

@@ -17,7 +17,7 @@ from src.core.server_controller import ServerController
 
 
 class LLMRequestThread(QThread):
-    """Thread pour les requêtes API en streaming."""
+    """Thread pour les requêtes API en streaming (Chat Completions)."""
     token_received = Signal(str)
     finished = Signal()
     error = Signal(str)
@@ -61,6 +61,75 @@ class LLMRequestThread(QThread):
             self.error.emit(str(e))
 
 
+class ResponsesRequestThread(QThread):
+    """Thread pour les requêtes Responses API en streaming (SSE typé)."""
+    token_received = Signal(str)
+    finished = Signal()
+    error = Signal(str)
+    response_id_received = Signal(str)
+
+    def __init__(self, url: str, payload: dict, api_key: str = ""):
+        super().__init__()
+        self.url = url
+        self.payload = payload
+        self.api_key = api_key
+
+    def run(self):
+        import requests
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        try:
+            response = requests.post(
+                self.url, json=self.payload, headers=headers, stream=True, timeout=120
+            )
+            response.raise_for_status()
+
+            current_event = None
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                # Ligne event:
+                if line.startswith("event: "):
+                    current_event = line[7:].strip()
+                    continue
+
+                # Ligne data:
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        current_event = None
+                        continue
+
+                    # response.created → récupérer l'ID
+                    if current_event == "response.created":
+                        resp_id = data.get("response", {}).get("id", "")
+                        if resp_id:
+                            self.response_id_received.emit(resp_id)
+
+                    # response.output_text.delta → token
+                    elif current_event == "response.output_text.delta":
+                        delta = data.get("delta", "")
+                        if delta:
+                            self.token_received.emit(delta)
+
+                    # response.completed → fin
+                    elif current_event == "response.completed":
+                        break
+
+                    current_event = None
+
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ChatTab(QWidget):
     """Interface de chat complète intégrée."""
 
@@ -70,6 +139,7 @@ class ChatTab(QWidget):
         self.server = server
         self._messages = []  # [{"role": "user"|"assistant", "content": str}]
         self._current_thread = None
+        self._previous_response_id: str = ""  # Pour mode Responses stateful
         self._setup_ui()
 
     def _setup_ui(self):
@@ -230,6 +300,7 @@ class ChatTab(QWidget):
 
     def _new_chat(self):
         self._messages = []
+        self._previous_response_id = ""
         self._clear_messages_ui()
         self.input_edit.clear()
 
@@ -344,7 +415,18 @@ class ChatTab(QWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
-        # Préparer la requête
+        api_key = self.config.get("api_key", "") if self.config.get("api_key_enabled", False) else ""
+        api_mode = self.config.get("api_mode", "chat_completions")
+
+        if api_mode == "responses":
+            self._send_responses_request(text, api_key)
+        else:
+            self._send_chat_request(text, api_key)
+
+        self._response_buffer = ""
+
+    def _send_chat_request(self, text: str, api_key: str):
+        """Envoie une requête Chat Completions classique."""
         messages = [{"role": "system", "content": self.system_prompt_edit.toPlainText()}] \
             if self.system_prompt_edit.toPlainText() else []
         messages += [{"role": m["role"], "content": m["content"]}
@@ -358,8 +440,6 @@ class ChatTab(QWidget):
             "stream": True,
         }
 
-        api_key = self.config.get("api_key", "") if self.config.get("api_key_enabled", False) else ""
-
         self._current_thread = LLMRequestThread(
             url=self.config.api_chat_url,
             payload=payload,
@@ -370,7 +450,58 @@ class ChatTab(QWidget):
         self._current_thread.error.connect(self._on_error)
         self._current_thread.start()
 
-        self._response_buffer = ""
+    def _send_responses_request(self, text: str, api_key: str):
+        """Envoie une requête Responses API."""
+        # Construire l'input: messages précédents + nouveau
+        input_items = []
+
+        # System prompt → instructions (envoyé à chaque requête)
+        instructions = self.system_prompt_edit.toPlainText()
+
+        # Messages précédents (historique)
+        for m in self._messages[:-1]:  # exclure le placeholder
+            input_items.append({
+                "type": "message",
+                "role": m["role"],
+                "content": m["content"],
+            })
+
+        # Nouveau message
+        input_items.append({
+            "type": "message",
+            "role": "user",
+            "content": text,
+        })
+
+        payload = {
+            "model": self.model_combo.currentText() or "default",
+            "input": input_items,
+            "temperature": self.temp_spin.value(),
+            "max_output_tokens": self.max_tokens_spin.value(),
+            "stream": True,
+        }
+
+        if instructions:
+            payload["instructions"] = instructions
+
+        # Stateful: previous_response_id
+        if self._previous_response_id:
+            payload["previous_response_id"] = self._previous_response_id
+
+        self._current_thread = ResponsesRequestThread(
+            url=self.server.api_responses_url,
+            payload=payload,
+            api_key=api_key,
+        )
+        self._current_thread.token_received.connect(self._on_token)
+        self._current_thread.response_id_received.connect(self._on_response_id)
+        self._current_thread.finished.connect(self._on_finished)
+        self._current_thread.error.connect(self._on_error)
+        self._current_thread.start()
+
+    def _on_response_id(self, response_id: str):
+        """Stocke le response_id pour le state management."""
+        self._previous_response_id = response_id
 
     def _on_token(self, token: str):
         self._response_buffer += token

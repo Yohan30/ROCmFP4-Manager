@@ -27,7 +27,7 @@ class MainWindow(QMainWindow):
     """Fenêtre principale avec les onglets."""
 
     APP_NAME = "ROCmFP4 Manager"
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
 
     _server_signal = Signal(str, object)
 

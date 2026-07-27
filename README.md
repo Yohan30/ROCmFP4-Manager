@@ -8,12 +8,13 @@ Desktop GUI to **download, configure and run** GGUF models in **ROCmFP4** format
 
 - **Model management** — HuggingFace search & download, LM Studio import, multi-part and MTP support
 - **Visual configuration** — Context, batch, K/V cache, MTP, flash attention, all via sliders
-- **Server control** — Start/Stop/Restart, live logs, API URLs displayed
+- **Server control** — Start/Stop/Restart, live logs, API URLs displayed, LAN access toggle, API mode indicator
 - **Built-in chat** — Discussion interface with streaming, markdown, and history
 - **Built-in bench** — Performance tests with `llama-bench`, multi-run, CSV/JSON export
 - **Auto-start** — systemd service to launch the app and/or server at boot
 - **Theme support** — Dark/Light themes with customizable accent and background colors
 - **Auto-update** — Check and install new versions from GitHub releases
+- **OpenAI Responses API** — Built-in adapter (port 1413) translating `/v1/responses` to Chat Completions, with streaming, tool calls, and conversation state management
 
 ## Requirements
 
@@ -51,6 +52,7 @@ The app will detect if ROCmFPX is installed and offer to clone/build it.
 
 - Web UI + API: **`http://localhost:1412`**
 - Chat API: `http://localhost:1412/v1/chat/completions`
+- Responses API (adapter): **`http://localhost:1413/v1/responses`**
 
 ## Tech Stack
 

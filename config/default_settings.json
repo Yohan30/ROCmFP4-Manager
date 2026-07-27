@@ -26,6 +26,7 @@
   "last_model": "",
   "last_mtp_model": "",
   "last_mmproj_model": "",
+  "api_mode": "chat_completions",
   "advanced_args": "",
   "theme": "dark",
   "language": "en",

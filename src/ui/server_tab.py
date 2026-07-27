@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QGroupBox, QPlainTextEdit, QFrame, QGridLayout, QApplication,
-    QLineEdit, QCheckBox, QSplitter, QSpacerItem, QSizePolicy,
+    QLineEdit, QCheckBox, QComboBox, QSplitter, QSpacerItem, QSizePolicy,
     QSpinBox
 )
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -84,6 +84,9 @@ class ServerTab(QWidget):
         self.mem_label = QLabel("Memory: —")
         status_grid.addWidget(self.mem_label, 1, 3)
 
+        self.api_mode_label = QLabel("API: —")
+        status_grid.addWidget(self.api_mode_label, 1, 4)
+
         self.model_label = QLabel("Model: —")
         self.model_label.setWordWrap(True)
         status_grid.addWidget(self.model_label, 2, 0, 1, 4)
@@ -114,11 +117,14 @@ class ServerTab(QWidget):
 
         urls = [
             ("Chat Completions", self.config.api_chat_url),
+            ("Responses", self.server.api_responses_url),
             ("Completions", self.config.api_completions_url),
             ("Embeddings", self.config.api_embeddings_url),
             ("Health", self.config.api_health_url),
             ("Web Interface", self.config.api_url),
         ]
+
+        self._url_labels: dict[str, QLabel] = {}
 
         for label, url in urls:
             row = QHBoxLayout()
@@ -127,8 +133,23 @@ class ServerTab(QWidget):
             url_label.setStyleSheet("color: #1a73e8; font-family: monospace;")
             url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(url_label, 1)
+            self._url_labels[label] = url_label
 
             if label == "Web Interface":
+                # Sélecteur de mode API (Chat Completions / Responses)
+                mode_label = QLabel("Mode serveur:")
+                row.addWidget(mode_label, 0)
+                self.api_mode_combo = QComboBox()
+                self.api_mode_combo.addItem("Chat Completions", "chat_completions")
+                self.api_mode_combo.addItem("Responses", "responses")
+                self.api_mode_combo.setToolTip("Select API mode.\nChat Completions: classic /v1/chat/completions endpoint.\nResponses: modern /v1/responses endpoint (requires adapter).")
+                current_mode = self.config.get("api_mode", "chat_completions")
+                idx = self.api_mode_combo.findData(current_mode)
+                if idx >= 0:
+                    self.api_mode_combo.setCurrentIndex(idx)
+                self.api_mode_combo.currentIndexChanged.connect(self._on_api_mode_changed)
+                row.addWidget(self.api_mode_combo, 0)
+
                 self.lan_check = QCheckBox("LAN")
                 self.lan_check.setToolTip("Allow access from local network (binds to 0.0.0.0 instead of 127.0.0.1).\nRequires server restart.")
                 self.lan_check.setChecked(self.config.get("host", "127.0.0.1") == "0.0.0.0")
@@ -317,6 +338,11 @@ class ServerTab(QWidget):
             self.tps_label.setText("Tokens/s: —")
             self.mem_label.setText("Memory: —")
             self.model_label.setText("Model: —")
+            self.api_mode_label.setText("API: —")
+        elif event == "adapter_started":
+            self._refresh_api_mode_label()
+        elif event == "adapter_stopped":
+            self._refresh_api_mode_label()
 
     def _on_start(self):
         """Démarre le serveur avec le modèle sélectionné."""
@@ -371,6 +397,17 @@ class ServerTab(QWidget):
             self.mem_label.setText(f"Memory: {mem:.0f} MB" if mem else "Memory: —")
             self.pid_label.setText(f"PID: {self.server.pid}")
             self.model_label.setText(f"Model: {self.config.get('last_model', '—')}")
+        self._refresh_api_mode_label()
+
+    def _refresh_api_mode_label(self):
+        """Met à jour le label du mode API dans la barre d'état."""
+        mode = self.config.get("api_mode", "chat_completions")
+        if mode == "responses":
+            adapter_on = self.server.adapter_running
+            status = "🔄" if adapter_on else "⏸️"
+            self.api_mode_label.setText(f"API: Responses {status}")
+        else:
+            self.api_mode_label.setText("API: Chat Completions")
 
     def _on_api_key_text_changed(self, text):
         self.config.set("api_key", text)
@@ -482,10 +519,10 @@ class ServerTab(QWidget):
 
     def _on_port_changed(self, port: int):
         """Met à jour le port dans la config."""
-        self.config.port = port
         self.config.set("port", port)
         self.config.save()
         self.port_label.setText(f"Port: {port}")
+        self._refresh_urls()
 
     def _on_lan_toggled(self, enabled: bool):
         """Active/désactive l'accès réseau local."""
@@ -498,3 +535,25 @@ class ServerTab(QWidget):
             f"LAN access {'enabled' if enabled else 'disabled'}.\n"
             "Restart the server for the change to take effect."
         )
+
+    def _on_api_mode_changed(self, index: int):
+        """Met à jour le mode API (chat_completions / responses)."""
+        mode = self.api_mode_combo.itemData(index)
+        self.config.set("api_mode", mode)
+        self.config.save()
+        self._refresh_urls()
+        self._refresh_api_mode_label()
+
+    def _refresh_urls(self):
+        """Met à jour tous les labels d'URLs affichés."""
+        url_map = {
+            "Chat Completions": self.config.api_chat_url,
+            "Responses": self.server.api_responses_url,
+            "Completions": self.config.api_completions_url,
+            "Embeddings": self.config.api_embeddings_url,
+            "Health": self.config.api_health_url,
+            "Web Interface": self.config.api_url,
+        }
+        for label, url in url_map.items():
+            if label in self._url_labels:
+                self._url_labels[label].setText(url)

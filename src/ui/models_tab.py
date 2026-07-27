@@ -426,7 +426,8 @@ class ModelsTab(QWidget):
                 hf_url = self._guess_hf_url(r)
                 if hf_url:
                     hf_btn = QPushButton("Open")
-                    hf_btn.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+                    hf_btn.setFlat(True)
+                    hf_btn.setStyleSheet("QPushButton { border: none; background: transparent; color: #1a73e8; font-size: 12px; padding: 2px 6px; text-decoration: underline; } QPushButton:hover { color: #e94560; }")
                     _url = hf_url
                     hf_btn.clicked.connect(lambda checked, u=_url: self._open_url(u))
                     self.models_table.setCellWidget(idx, 5, hf_btn)
@@ -545,21 +546,6 @@ class ModelsTab(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Results for '{query}'")
         dialog.setMinimumSize(800, 500)
-        dialog.setStyleSheet("""
-            QDialog { background-color: #1a1a2e; }
-            QLabel { color: #e0e0e0; font-size: 13px; padding: 4px; }
-            QTableWidget {
-                background-color: #16213e; color: #e0e0e0;
-                border: 1px solid #2d2d44; border-radius: 6px;
-                gridline-color: #2d2d44; font-size: 13px;
-            }
-            QTableWidget::item { padding: 8px; }
-            QHeaderView::section {
-                background-color: #1a1a2e; color: #e94560;
-                border: none; padding: 8px; font-weight: bold; font-size: 12px;
-            }
-            QTableWidget::item:selected { background-color: #e94560; }
-        """)
 
         dl = QVBoxLayout(dialog)
         dl.setSpacing(8)
@@ -633,7 +619,8 @@ class ModelsTab(QWidget):
             # Bouton lien HF
             if r.get("id"):
                 hf_btn = QPushButton("Open")
-                hf_btn.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+                hf_btn.setFlat(True)
+                hf_btn.setStyleSheet("QPushButton { border: none; background: transparent; color: #1a73e8; font-size: 12px; padding: 2px 6px; text-decoration: underline; } QPushButton:hover { color: #e94560; }")
                 _hf_id = r["id"]
                 hf_btn.clicked.connect(lambda checked, hf_id=_hf_id: self._open_hf_page(hf_id))
                 table.setCellWidget(i, 5, hf_btn)
@@ -686,21 +673,6 @@ class ModelsTab(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Files in {repo_id}")
         dialog.setMinimumSize(750, 450)
-        dialog.setStyleSheet("""
-            QDialog { background-color: #1a1a2e; }
-            QLabel { color: #e0e0e0; font-size: 13px; padding: 4px; }
-            QTableWidget {
-                background-color: #16213e; color: #e0e0e0;
-                border: 1px solid #2d2d44; border-radius: 6px;
-                gridline-color: #2d2d44; font-size: 12px;
-            }
-            QTableWidget::item { padding: 6px; }
-            QHeaderView::section {
-                background-color: #1a1a2e; color: #e94560;
-                border: none; padding: 6px; font-weight: bold; font-size: 11px;
-            }
-            QTableWidget::item:selected { background-color: #e94560; }
-        """)
 
         dl = QVBoxLayout(dialog)
         dl.setSpacing(8)
@@ -715,6 +687,7 @@ class ModelsTab(QWidget):
 
         # Sélection par clic toggle (pas de Ctrl+click nécessaire)
         selected_rows: set[int] = set()
+        accent = self.config.get("accent_color", "#5555ff")
 
         def _toggle_row(row: int, _col: int):
             if row in selected_rows:
@@ -728,7 +701,7 @@ class ModelsTab(QWidget):
                 for col in range(table.columnCount()):
                     item = table.item(row, col)
                     if item:
-                        item.setBackground(QColor("#e94560"))
+                        item.setBackground(QColor(accent))
 
         table = QTableWidget(len(files), 4)
         table.setHorizontalHeaderLabels(["Filename", "Size", "Quantization", ""])
@@ -762,10 +735,9 @@ class ModelsTab(QWidget):
         for i, f in enumerate(files):
             fname_item = QTableWidgetItem(f["filename"])
             fname_item.setToolTip(f["filename"])
-            if "rocmfp4" in f["filename"].lower():
-                fname_item.setForeground(QColor("#ff4d00"))
-            elif "mtp" in f["filename"].lower():
-                fname_item.setForeground(QColor("#9b59b6"))
+            font = fname_item.font()
+            font.setBold(True)
+            fname_item.setFont(font)
             table.setItem(i, 0, fname_item)
 
             # Taille réelle depuis l'API
@@ -812,9 +784,7 @@ class ModelsTab(QWidget):
 
         # Barre de résumé des tailles
         summary_frame = QFrame()
-        summary_frame.setStyleSheet("""
-            QFrame { background-color: #0f3460; border-radius: 6px; padding: 8px; }
-        """)
+        summary_frame.setProperty("summary", True)
         summary_layout = QHBoxLayout(summary_frame)
         summary_layout.setContentsMargins(12, 8, 12, 8)
 
