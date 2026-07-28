@@ -99,7 +99,7 @@ class ProcessManager:
                     pass
 
     def start(self, args: list, cwd: Optional[Path] = None,
-              log_path: Optional[Path] = None) -> bool:
+              log_path: Optional[Path] = None, env: Optional[dict] = None) -> bool:
         """Démarre un processus avec les arguments donnés."""
         if self.is_running:
             return False
@@ -118,6 +118,7 @@ class ProcessManager:
                 stdout=stdout,
                 stderr=stderr,
                 cwd=str(cwd) if cwd else None,
+                env=env,
                 text=True,
                 bufsize=1,
                 start_new_session=True,

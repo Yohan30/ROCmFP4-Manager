@@ -249,7 +249,7 @@ class ServerController:
         env["HSA_OVERRIDE_GFX_VERSION"] = "11.5.1"
         env["GGML_HIP_ENABLE_UNIFIED_MEMORY"] = "1"
 
-        success = self._proc.start(full_args, log_path=log_file)
+        success = self._proc.start(full_args, log_path=log_file, env=env)
         if success:
             self._start_time = time.time()
             self._running = True
