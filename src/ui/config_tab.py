@@ -215,7 +215,14 @@ class ConfigTab(QWidget):
 
         cache_grid.addWidget(QLabel("Cache K:"))
         self.cache_k_combo = QComboBox()
-        self.cache_k_combo.addItems(["q8_0", "q4_0", "q6_0", "turbo4", "turbo3", "f16"])
+        kv_cache_types = [
+            "f32", "f16", "bf16",
+            "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1",
+            "q4_0_rocmfp4", "q4_0_rocmfp4_fast",
+            "q3_0_rocmfpx", "q6_0_rocmfpx", "q8_0_rocmfpx",
+            "turbo3", "turbo4",
+        ]
+        self.cache_k_combo.addItems(kv_cache_types)
         self.cache_k_combo.setCurrentText("q8_0")
         self.cache_k_combo.setFixedWidth(140)
         cache_grid.addWidget(self.cache_k_combo)
@@ -224,7 +231,7 @@ class ConfigTab(QWidget):
 
         cache_grid.addWidget(QLabel("Cache V:"))
         self.cache_v_combo = QComboBox()
-        self.cache_v_combo.addItems(["q8_0", "q4_0", "q6_0", "turbo4", "turbo3", "f16"])
+        self.cache_v_combo.addItems(kv_cache_types)
         self.cache_v_combo.setCurrentText("q8_0")
         self.cache_v_combo.setFixedWidth(140)
         cache_grid.addWidget(self.cache_v_combo)
