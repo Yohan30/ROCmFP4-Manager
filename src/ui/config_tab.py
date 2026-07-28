@@ -192,16 +192,17 @@ class ConfigTab(QWidget):
         self.flash_attn_check.setToolTip("Flash attention memory (-fa)\nReduces context memory usage\nRecommended: enabled")
         perf_grid.addWidget(self.flash_attn_check, 2, 2)
 
-        # Row 2b: SWA Full (sous flash_attn)
-        self.swa_full_check = QCheckBox("SWA Full")
-        self.swa_full_check.setChecked(False)
-        self.swa_full_check.setToolTip(
-            "Disable SWA pruning (--swa-full)\n"
-            "ENABLE if you see 'forcing full prompt re-processing'\n"
-            "Fixes cache invalidation on Qwen 3.x / Gemma 3-4 models\n"
-            "Cost: slightly more VRAM usage"
+        # Row 2b: Fix cache SWA (sous flash_attn)
+        self.no_kv_unified_check = QCheckBox("Fix SWA cache bug")
+        self.no_kv_unified_check.setChecked(False)
+        self.no_kv_unified_check.setToolTip(
+            "Workaround for SWA cache invalidation (--no-kv-unified)\n"
+            "ENABLE if llama.cpp shows 'forcing full prompt re-processing'\n"
+            "(Qwen 3.x / Gemma 3-4 models on any KV cache type)\n"
+            "⚠️ If this doesn't help, try --swa-full in Advanced args\n"
+            "   (but --swa-full DOUBLES VRAM and may crash!)"
         )
-        perf_grid.addWidget(self.swa_full_check, 3, 2)
+        perf_grid.addWidget(self.no_kv_unified_check, 3, 2)
 
         # Parallel dans un sous-layout horizontal
         parallel_widget = QWidget()
@@ -339,7 +340,7 @@ class ConfigTab(QWidget):
         self.ubatch_spin.setValue(int(self.config.get("ubatch_size", 1024)))
         self.gpu_layers_spin.setValue(int(self.config.get("gpu_layers", 999)))
         self.flash_attn_check.setChecked(self.config.get("flash_attn", True))
-        self.swa_full_check.setChecked(self.config.get("swa_full", False))
+        self.no_kv_unified_check.setChecked(self.config.get("no_kv_unified", False))
         self.parallel_spin.setValue(int(self.config.get("parallel", 1)))
         self.cache_k_combo.setCurrentText(self.config.get("cache_type_k", "q8_0"))
         self.cache_v_combo.setCurrentText(self.config.get("cache_type_v", "q8_0"))
@@ -384,7 +385,7 @@ class ConfigTab(QWidget):
         self.config.set("ubatch_size", self.ubatch_spin.value())
         self.config.set("gpu_layers", self.gpu_layers_spin.value())
         self.config.set("flash_attn", self.flash_attn_check.isChecked())
-        self.config.set("swa_full", self.swa_full_check.isChecked())
+        self.config.set("no_kv_unified", self.no_kv_unified_check.isChecked())
         self.config.set("parallel", self.parallel_spin.value())
         self.config.set("cache_type_k", self.cache_k_combo.currentText())
         self.config.set("cache_type_v", self.cache_v_combo.currentText())

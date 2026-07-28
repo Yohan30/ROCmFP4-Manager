@@ -119,10 +119,11 @@ class Config:
             args.append("--flash-attn")
             args.append("on")
 
-        # SWA full: désactive l'élagage SWA pour éviter le re-traitement complet
-        # (fix pour les modèles Qwen 3.x, Gemma 3/4 - llama.cpp PR #13194)
-        if self.get("swa_full", False):
-            args.append("--swa-full")
+        # Fix SWA cache invalidation (llama.cpp PR #13194)
+        # --no-kv-unified : alternative légère, ne double PAS la VRAM
+        # --swa-full      : garantit le fix mais DOUBLE la VRAM du cache SWA → crash si VRAM insuffisante
+        if self.get("no_kv_unified", False):
+            args.append("--no-kv-unified")
 
         args.extend(["--cache-type-k", self.get("cache_type_k", "q8_0")])
         args.extend(["--cache-type-v", self.get("cache_type_v", "q8_0")])
