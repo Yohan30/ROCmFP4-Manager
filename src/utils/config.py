@@ -119,6 +119,11 @@ class Config:
             args.append("--flash-attn")
             args.append("on")
 
+        # SWA full: désactive l'élagage SWA pour éviter le re-traitement complet
+        # (fix pour les modèles Qwen 3.x, Gemma 3/4 - llama.cpp PR #13194)
+        if self.get("swa_full", False):
+            args.append("--swa-full")
+
         args.extend(["--cache-type-k", self.get("cache_type_k", "q8_0")])
         args.extend(["--cache-type-v", self.get("cache_type_v", "q8_0")])
 
