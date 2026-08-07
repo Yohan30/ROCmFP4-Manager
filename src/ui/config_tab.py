@@ -5,7 +5,8 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QSpinBox, QComboBox, QCheckBox, QSlider,
-    QLineEdit, QFileDialog, QGridLayout, QTextEdit, QMessageBox
+    QLineEdit, QFileDialog, QGridLayout, QTextEdit, QMessageBox,
+    QApplication
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -45,7 +46,7 @@ class ConfigTab(QWidget):
         self.browse_model_btn.setMinimumHeight(36)
         self.browse_model_btn.setMinimumWidth(100)
         self.browse_model_btn.clicked.connect(self._browse_model)
-        self.model_path_input.textChanged.connect(self._load_model_args)
+        self.model_path_input.textChanged.connect(self._on_model_path_changed)
         model_grid.addWidget(self.browse_model_btn, 0, 2)
 
         model_grid.addWidget(QLabel("MTP Companion:"), 1, 0)
@@ -75,10 +76,33 @@ class ConfigTab(QWidget):
         self.browse_mmproj_btn.clicked.connect(self._browse_mmproj)
         model_grid.addWidget(self.browse_mmproj_btn, 2, 2)
 
-        model_grid.addWidget(QLabel("Models folder:"), 3, 0)
-        self.models_folder_label = QLabel(str(self.config.models_path))
-        self.models_folder_label.setStyleSheet("font-family: monospace;")
-        model_grid.addWidget(self.models_folder_label, 3, 1, 1, 2)
+        model_grid.addWidget(QLabel("Draft Model:"), 3, 0)
+        self.draft_path_input = QLineEdit()
+        self.draft_path_input.setPlaceholderText("Draft .gguf file (optional, for speculative decoding)...")
+        self.draft_path_input.setMinimumHeight(36)
+        self.draft_path_input.setToolTip("External draft model for speculative decoding\n"
+            "Used as --spec-draft-model when MTP is enabled\n"
+            "Leave empty to use the main model as its own draft (self-speculative)")
+        model_grid.addWidget(self.draft_path_input, 3, 1)
+        self.browse_draft_btn = QPushButton("📂 Browse")
+        self.browse_draft_btn.setMinimumHeight(36)
+        self.browse_draft_btn.setMinimumWidth(100)
+        self.browse_draft_btn.clicked.connect(self._browse_draft)
+        model_grid.addWidget(self.browse_draft_btn, 3, 2)
+
+        model_grid.addWidget(QLabel("Chat Template:"), 4, 0)
+        self.chat_template_input = QLineEdit()
+        self.chat_template_input.setPlaceholderText("Path to .jinja template file (optional)...")
+        self.chat_template_input.setMinimumHeight(36)
+        self.chat_template_input.setToolTip("Custom Jinja chat template file\n"
+            "Uses --chat-template <file> instead of the embedded template\n"
+            "Leave empty to use --jinja (embedded template from GGUF)")
+        model_grid.addWidget(self.chat_template_input, 4, 1)
+        self.browse_template_btn = QPushButton("📂 Browse")
+        self.browse_template_btn.setMinimumHeight(36)
+        self.browse_template_btn.setMinimumWidth(100)
+        self.browse_template_btn.clicked.connect(self._browse_template)
+        model_grid.addWidget(self.browse_template_btn, 4, 2)
 
         layout.addWidget(model_group)
 
@@ -192,7 +216,7 @@ class ConfigTab(QWidget):
         self.flash_attn_check.setToolTip("Flash attention memory (-fa)\nReduces context memory usage\nRecommended: enabled")
         perf_grid.addWidget(self.flash_attn_check, 2, 2)
 
-        # Row 2b: Fix cache SWA (sous flash_attn)
+        # Fix cache SWA
         self.no_kv_unified_check = QCheckBox("Fix SWA cache bug")
         self.no_kv_unified_check.setChecked(False)
         self.no_kv_unified_check.setToolTip(
@@ -203,6 +227,32 @@ class ConfigTab(QWidget):
             "   (but --swa-full DOUBLES VRAM and may crash!)"
         )
         perf_grid.addWidget(self.no_kv_unified_check, 3, 2)
+
+        # === Environnement ROCm (env vars, PAS des flags CLI) ===
+        # Cases compactes sur la ligne existante → aucune hauteur ajoutée
+        self.env_gfx_check = QCheckBox("gfx1151")
+        self.env_gfx_check.setChecked(True)
+        self.env_gfx_check.setToolTip(
+            "Export HSA_OVERRIDE_GFX_VERSION=11.5.1\n"
+            "Required for AMD Strix Halo (gfx1151) on HIP/ROCm"
+        )
+        perf_grid.addWidget(self.env_gfx_check, 3, 0)
+
+        self.env_umem_check = QCheckBox("Unified mem")
+        self.env_umem_check.setChecked(True)
+        self.env_umem_check.setToolTip(
+            "Export GGML_HIP_ENABLE_UNIFIED_MEMORY=1\n"
+            "Unified memory pool (HIP)"
+        )
+        perf_grid.addWidget(self.env_umem_check, 3, 1)
+
+        self.env_ldlib_check = QCheckBox("LD_LIBRARY_PATH")
+        self.env_ldlib_check.setChecked(True)
+        self.env_ldlib_check.setToolTip(
+            "Prepend the ROCmFPX build/bin to LD_LIBRARY_PATH\n"
+            "Avoids a soname clash if a Vulkan llama.cpp build is also installed"
+        )
+        perf_grid.addWidget(self.env_ldlib_check, 3, 3)
 
         # Parallel dans un sous-layout horizontal
         parallel_widget = QWidget()
@@ -258,42 +308,41 @@ class ConfigTab(QWidget):
         mtp_layout.setSpacing(8)
         mtp_layout.setContentsMargins(10, 16, 10, 10)
 
-        self.mtp_check = QCheckBox("Enable MTP (self-speculative decoding)")
-        mtp_layout.addWidget(self.mtp_check)
+        mtp_top_row = QHBoxLayout()
+        mtp_top_row.setSpacing(8)
 
-        mtp_grid = QHBoxLayout()
-        mtp_grid.setSpacing(8)
+        self.mtp_check = QCheckBox("Enable MTP")
+        mtp_top_row.addWidget(self.mtp_check)
 
-        mtp_grid.addWidget(QLabel("n-max:"))
+        mtp_top_row.addSpacing(12)
+        mtp_top_row.addWidget(QLabel("n-max:"))
         self.mtp_nmax_spin = QSpinBox()
         self.mtp_nmax_spin.setRange(1, 6)
         self.mtp_nmax_spin.setValue(4)
-        self.mtp_nmax_spin.setFixedWidth(80)
-        mtp_grid.addWidget(self.mtp_nmax_spin)
+        self.mtp_nmax_spin.setFixedWidth(70)
+        mtp_top_row.addWidget(self.mtp_nmax_spin)
 
-        mtp_grid.addSpacing(16)
-
-        mtp_grid.addWidget(QLabel("p-min:"))
+        mtp_top_row.addSpacing(12)
+        mtp_top_row.addWidget(QLabel("p-min:"))
         self.mtp_pmin_spin = QSpinBox()
         self.mtp_pmin_spin.setRange(5, 100)
         self.mtp_pmin_spin.setValue(55)
         self.mtp_pmin_spin.setSuffix("%")
-        self.mtp_pmin_spin.setFixedWidth(80)
-        mtp_grid.addWidget(self.mtp_pmin_spin)
+        self.mtp_pmin_spin.setFixedWidth(70)
+        mtp_top_row.addWidget(self.mtp_pmin_spin)
 
-        mtp_grid.addSpacing(16)
-
-        mtp_grid.addWidget(QLabel("p-split:"))
+        mtp_top_row.addSpacing(12)
+        mtp_top_row.addWidget(QLabel("p-split:"))
         self.mtp_psplit_spin = QSpinBox()
         self.mtp_psplit_spin.setRange(1, 100)
         self.mtp_psplit_spin.setValue(10)
         self.mtp_psplit_spin.setSuffix("%")
-        self.mtp_psplit_spin.setFixedWidth(80)
-        mtp_grid.addWidget(self.mtp_psplit_spin)
+        self.mtp_psplit_spin.setFixedWidth(70)
+        mtp_top_row.addWidget(self.mtp_psplit_spin)
 
-        mtp_grid.addStretch()
+        mtp_top_row.addStretch()
 
-        mtp_layout.addLayout(mtp_grid)
+        mtp_layout.addLayout(mtp_top_row)
         layout.addWidget(mtp_group)
 
 
@@ -325,87 +374,138 @@ class ConfigTab(QWidget):
         self.reset_btn.clicked.connect(self._reset_config)
         btn_layout.addWidget(self.reset_btn)
 
+        self.copy_btn = QPushButton("📋 Copier params")
+        self.copy_btn.setMinimumHeight(38)
+        self.copy_btn.setStyleSheet("QPushButton { text-align: center; }")
+        self.copy_btn.setToolTip("Copie les paramètres batch/ubatch/cache/MTP/flash attn/advanced args en ligne de commande")
+        self.copy_btn.clicked.connect(self._copy_params)
+        btn_layout.addWidget(self.copy_btn)
+
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         layout.addStretch()
 
     def _load_config(self):
+        """Charge la configuration : paramètres du modèle si dispo, sinon globaux."""
         model_path = self.config.get("last_model", "")
         self.model_path_input.setText(model_path)
+        g = lambda k, d: self.config.get_model_setting(model_path, k, d)
+
         self.mtp_path_input.setText(self.config.get("last_mtp_model", ""))
         self.mmproj_path_input.setText(self.config.get("last_mmproj_model", ""))
-        self.backend_combo.setCurrentText(self.config.get("backend", "Vulkan0"))
-        self.ctx_input.setText(str(int(self.config.get("context_size", 32768))))
-        self.batch_spin.setValue(int(self.config.get("batch_size", 2048)))
-        self.ubatch_spin.setValue(int(self.config.get("ubatch_size", 1024)))
-        self.gpu_layers_spin.setValue(int(self.config.get("gpu_layers", 999)))
-        self.flash_attn_check.setChecked(self.config.get("flash_attn", True))
-        self.no_kv_unified_check.setChecked(self.config.get("no_kv_unified", False))
-        self.parallel_spin.setValue(int(self.config.get("parallel", 1)))
-        self.cache_k_combo.setCurrentText(self.config.get("cache_type_k", "q8_0"))
-        self.cache_v_combo.setCurrentText(self.config.get("cache_type_v", "q8_0"))
-        self.mtp_check.setChecked(self.config.get("mtp_enabled", False))
-        self.mtp_nmax_spin.setValue(int(self.config.get("mtp_n_max", 4)))
-        self.mtp_pmin_spin.setValue(int(self.config.get("mtp_p_min", 0.55) * 100))
-        self.mtp_psplit_spin.setValue(int(self.config.get("mtp_p_split", 0.10) * 100))
-        self.models_folder_label.setText(str(self.config.models_path))
+        self.draft_path_input.setText(self.config.get("last_draft_model", ""))
+        self.chat_template_input.setText(self.config.get("chat_template", ""))
+        self.backend_combo.setCurrentText(g("backend", "Vulkan0"))
+        self.ctx_input.setText(str(int(g("context_size", 32768))))
+        self.batch_spin.setValue(int(g("batch_size", 2048)))
+        self.ubatch_spin.setValue(int(g("ubatch_size", 1024)))
+        self.gpu_layers_spin.setValue(int(g("gpu_layers", 999)))
+        self.flash_attn_check.setChecked(g("flash_attn", True))
+        self.no_kv_unified_check.setChecked(g("no_kv_unified", False))
+        self.env_gfx_check.setChecked(g("env_hsa_override_gfx", True))
+        self.env_umem_check.setChecked(g("env_unified_memory", True))
+        self.env_ldlib_check.setChecked(g("env_prepend_ld_library_path", True))
+        self.parallel_spin.setValue(int(g("parallel", 1)))
+        self.cache_k_combo.setCurrentText(g("cache_type_k", "q8_0"))
+        self.cache_v_combo.setCurrentText(g("cache_type_v", "q8_0"))
+        self.mtp_check.setChecked(g("mtp_enabled", False))
+        self.mtp_nmax_spin.setValue(int(g("mtp_n_max", 4)))
+        self.mtp_pmin_spin.setValue(int(g("mtp_p_min", 0.55) * 100))
+        self.mtp_psplit_spin.setValue(int(g("mtp_p_split", 0.10) * 100))
 
-        # Charger les args spécifiques au modèle
+        # Charger les args spécifiques au modèle et mettre à jour le label
         self._load_model_args()
+        self._update_model_label()
+
+    def _update_model_label(self):
+        """Met à jour le label indiquant si le modèle a un profil sauvegardé."""
+        model_path = self.model_path_input.text().strip()
+        if model_path:
+            model_name = Path(model_path).name
+            if self.config.has_model_settings(model_path):
+                self.adv_args_label.setText(
+                    f"✅ Model profile active for {model_name} "
+                    f"(all settings below are model-specific)"
+                )
+                self.adv_args_label.setStyleSheet("font-size: 11px; color: #34a853; font-weight: bold;")
+            else:
+                self.adv_args_label.setText(
+                    f"🆕 No saved profile for {model_name} — using global defaults"
+                )
+                self.adv_args_label.setStyleSheet("font-size: 11px; color: #fbbc04;")
+        else:
+            self.adv_args_label.setText("")
+
+    def _on_model_path_changed(self):
+        """Appelé quand le chemin du modèle change : recharge les args et met à jour le label."""
+        self._load_model_args()
+        self._update_model_label()
 
     def _load_model_args(self):
         """Load model-specific advanced arguments."""
         model_path = self.model_path_input.text().strip()
         if model_path:
             args = self.config.get_model_args(model_path)
-            model_name = Path(model_path).name
-            if self.config._data.get("model_advanced_args", {}).get(model_name):
-                self.adv_args_label.setText(f"Model-specific arguments for {model_name}")
-                self.adv_args_label.setStyleSheet("font-size: 11px; color: #e94560;")
-            else:
-                self.adv_args_label.setText("Global arguments (applied to all models)")
-                self.adv_args_label.setStyleSheet("font-size: 11px; color: #888;")
             self.adv_args_input.setText(args)
         else:
             self.adv_args_input.setText(self.config.get("advanced_args", ""))
-            self.adv_args_label.setText("")
 
     def _save_config(self):
         model_path = self.model_path_input.text().strip()
         self.config.set("last_model", model_path)
         self.config.set("last_mtp_model", self.mtp_path_input.text())
         self.config.set("last_mmproj_model", self.mmproj_path_input.text())
-        self.config.set("backend", self.backend_combo.currentText())
-        raw = self.ctx_input.text().strip()
-        try:
-            self.config.set("context_size", int(raw))
-        except ValueError:
-            self.config.set("context_size", 32768)
-        self.config.set("batch_size", self.batch_spin.value())
-        self.config.set("ubatch_size", self.ubatch_spin.value())
-        self.config.set("gpu_layers", self.gpu_layers_spin.value())
-        self.config.set("flash_attn", self.flash_attn_check.isChecked())
-        self.config.set("no_kv_unified", self.no_kv_unified_check.isChecked())
-        self.config.set("parallel", self.parallel_spin.value())
-        self.config.set("cache_type_k", self.cache_k_combo.currentText())
-        self.config.set("cache_type_v", self.cache_v_combo.currentText())
-        self.config.set("mtp_enabled", self.mtp_check.isChecked())
-        self.config.set("mtp_n_max", self.mtp_nmax_spin.value())
-        self.config.set("mtp_p_min", self.mtp_pmin_spin.value() / 100.0)
-        self.config.set("mtp_p_split", self.mtp_psplit_spin.value() / 100.0)
+        self.config.set("last_draft_model", self.draft_path_input.text())
+        self.config.set("chat_template", self.chat_template_input.text())
 
-        # Sauvegarder les args spécifiques au modèle si un modèle est sélectionné
-        args = self.adv_args_input.text()
+        # Construire le dict des paramètres à sauvegarder
+        raw_ctx = self.ctx_input.text().strip()
+        try:
+            ctx_val = int(raw_ctx)
+        except ValueError:
+            ctx_val = 32768
+
+        settings = {
+            "backend": self.backend_combo.currentText(),
+            "context_size": ctx_val,
+            "batch_size": self.batch_spin.value(),
+            "ubatch_size": self.ubatch_spin.value(),
+            "gpu_layers": self.gpu_layers_spin.value(),
+            "flash_attn": self.flash_attn_check.isChecked(),
+            "no_kv_unified": self.no_kv_unified_check.isChecked(),
+            "env_hsa_override_gfx": self.env_gfx_check.isChecked(),
+            "env_unified_memory": self.env_umem_check.isChecked(),
+            "env_prepend_ld_library_path": self.env_ldlib_check.isChecked(),
+            "parallel": self.parallel_spin.value(),
+            "cache_type_k": self.cache_k_combo.currentText(),
+            "cache_type_v": self.cache_v_combo.currentText(),
+            "mtp_enabled": self.mtp_check.isChecked(),
+            "mtp_n_max": self.mtp_nmax_spin.value(),
+            "mtp_p_min": self.mtp_pmin_spin.value() / 100.0,
+            "mtp_p_split": self.mtp_psplit_spin.value() / 100.0,
+        }
+
         if model_path:
-            self.config.set_model_args(model_path, args)
+            # Sauvegarder dans le profil du modèle
+            self.config.set_model_settings(model_path, settings)
+            # Sauvegarder aussi les args avancés
+            self.config.set_model_args(model_path, self.adv_args_input.text())
         else:
-            self.config.set("advanced_args", args)
+            # Pas de modèle sélectionné → sauvegarde globale (fallback)
+            for k, v in settings.items():
+                self.config.set(k, v)
+            self.config.set("advanced_args", self.adv_args_input.text())
+
         self.config.save()
 
         # Mettre à jour le label
-        self._load_model_args()
+        self._update_model_label()
 
-        QMessageBox.information(self, "Configuration", "Configuration saved ✓")
+        model_name = Path(model_path).name if model_path else "Global"
+        QMessageBox.information(
+            self, "Configuration",
+            f"Configuration saved for {model_name} ✓"
+        )
 
     def _reset_config(self):
         from src.utils.config import Config as Cfg
@@ -414,6 +514,44 @@ class ConfigTab(QWidget):
             self.config.set(k, v)
         self._load_config()
         QMessageBox.information(self, "Configuration", "Configuration reset ✓")
+
+    def _copy_params(self):
+        """Copie les paramètres batch/ubatch/cache/MTP/flash attn/advanced args."""
+        parts = []
+
+        # Batch & Ubatch
+        b = self.batch_spin.value()
+        u = self.ubatch_spin.value()
+        parts.append(f"--batch-size {b}")
+        parts.append(f"--ubatch-size {u}")
+
+        # Cache K/V
+        ck = self.cache_k_combo.currentText()
+        cv = self.cache_v_combo.currentText()
+        parts.append(f"--cache-type-k {ck}")
+        parts.append(f"--cache-type-v {cv}")
+
+        # MTP n-max
+        nm = self.mtp_nmax_spin.value()
+        parts.append(f"--spec-draft-n-max {nm}")
+
+        # Flash Attention (seulement si coché)
+        if self.flash_attn_check.isChecked():
+            parts.append("--flash-attn on")
+
+        # MTP p-min / p-split
+        pmin = self.mtp_pmin_spin.value()
+        psplit = self.mtp_psplit_spin.value()
+        parts.append(f"--spec-draft-p-min {pmin / 100:.2f}")
+        parts.append(f"--spec-draft-p-split {psplit / 100:.2f}")
+
+        # Advanced args
+        adv = self.adv_args_input.text().strip()
+        if adv:
+            parts.append(adv)
+
+        cmd = " ".join(parts)
+        QApplication.clipboard().setText(cmd)
 
     def _browse_model(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -441,3 +579,21 @@ class ConfigTab(QWidget):
         )
         if path:
             self.mmproj_path_input.setText(path)
+
+    def _browse_draft(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Draft model",
+            str(self.config.models_path),
+            "GGUF Files (*.gguf);;All Files (*)"
+        )
+        if path:
+            self.draft_path_input.setText(path)
+
+    def _browse_template(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Chat Template",
+            str(Path.home()),
+            "Jinja Templates (*.jinja *.j2);;All Files (*)"
+        )
+        if path:
+            self.chat_template_input.setText(path)

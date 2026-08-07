@@ -110,6 +110,13 @@ class I18n:
             "rocmfpx_compiling": {"en": "Compiling (5-10 min)...", "fr": "Compilation (5-10 min)..."},
             "rocmfpx_build_logs": {"en": "Build Logs", "fr": "Logs de compilation"},
             "rocmfpx_build_deleted": {"en": "Build deleted. You can recompile.", "fr": "Build supprimé. Vous pouvez recompiler."},
+            "rocmfpx_profile": {"en": "Profile", "fr": "Profil"},
+            "rocmfpx_profile_select": {"en": "Select ROCmFPX version", "fr": "Choisir la version ROCmFPX"},
+            "rocmfpx_profile_used": {"en": "Profile", "fr": "Profil"},
+            "rocmfpx_profile_charlie": {"en": "ROCmFPX Standard (charlie12345)", "fr": "ROCmFPX Standard (charlie12345)"},
+            "rocmfpx_profile_ciru": {"en": "CIRU Laguna V2", "fr": "CIRU Laguna V2"},
+            "rocmfpx_switch_profile": {"en": "Switch profile", "fr": "Changer de profil"},
+            "rocmfpx_switch_confirm": {"en": "Switch ROCmFPX profile?\n\nThe current build belongs to another profile.\nSwitching will show the status of the selected profile.", "fr": "Changer de profil ROCmFPX ?\n\nLe build actuel appartient à un autre profil.\nLe changement affichera le statut du profil sélectionné."},
 
             # --- Bench ---
             "bench": {"en": "Benchmark", "fr": "Benchmark"},

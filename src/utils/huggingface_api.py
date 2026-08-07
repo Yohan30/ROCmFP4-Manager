@@ -1,7 +1,7 @@
 """Wrapper simple pour l'API HuggingFace Hub."""
 
 from huggingface_hub import HfApi, list_repo_files
-from typing import List, Dict
+from typing import List, Dict, Optional
 import re
 
 
@@ -13,15 +13,24 @@ class HuggingFaceAPI:
     def __init__(self):
         self._api = HfApi()
 
-    def search_models(self, query: str = "", limit: int = 50) -> List[Dict]:
-        """Cherche des modèles GGUF potentiellement ROCmFP4."""
+    def search_models(self, query: str = "", limit: Optional[int] = None) -> List[Dict]:
+        """Cherche des modèles GGUF potentiellement ROCmFP4.
+
+        Par défaut (limit=None), renvoie TOUS les modèles correspondant à la
+        recherche, sans plafond. Un limit explicite peut être passé pour
+        restreindre le nombre de résultats.
+        """
         results = []
 
         try:
+            # filter="gguf" : ne renvoyer que les modèles GGUF (côté serveur),
+            # ce qui rend la liste pertinente et limite fortement le volume
+            # pour les requêtes génériques.
             models = self._api.list_models(
                 search=query,
+                filter="gguf",
                 sort="downloads",
-                limit=limit * 2,
+                limit=limit,  # None = tous les résultats (pagination complète)
             )
         except Exception as e:
             return []
@@ -59,7 +68,8 @@ class HuggingFaceAPI:
 
             is_rocmfp4 = bool(self.ROCMFP4_PATTERN.search(model_id))
 
-            # Taille totale pour les 10 premiers (trop lent pour 50)
+            # Taille totale: calculée plus bas pour les 10 premiers uniquement
+            # (trop lent pour tous les résultats)
             total_size = 0
 
             results.append({
@@ -74,7 +84,6 @@ class HuggingFaceAPI:
 
         # Trier: ROCmFP4 en premier, puis par téléchargements
         results.sort(key=lambda r: (not r["is_rocmfp4"], -r["downloads"]))
-        results = results[:limit]
 
         # Fetch sizes for top results only (max 10)
         import concurrent.futures

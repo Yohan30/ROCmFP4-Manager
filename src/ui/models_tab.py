@@ -102,7 +102,7 @@ class ModelsTab(QWidget):
         self.models_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.models_table.setSelectionMode(QTableWidget.SingleSelection)
         self.models_table.verticalHeader().setVisible(False)
-        self.models_table.verticalHeader().setDefaultSectionSize(32)
+        self.models_table.verticalHeader().setDefaultSectionSize(38)
         models_layout.addWidget(self.models_table)
 
         # Boutons modèles + LM Studio
@@ -450,8 +450,6 @@ class ModelsTab(QWidget):
                     select_btn.clicked.connect(lambda checked, p=_p: self._select_model(p))
                     self.models_table.setCellWidget(idx, 6, select_btn)
 
-        self.models_table.setRowHeight(last_row, 28)
-
         # Afficher/masquer le bouton "Import all"
         has_lmstudio = any(
             r.get("source") == "lmstudio" for r in rows if not r.get("is_header")
@@ -540,8 +538,7 @@ class ModelsTab(QWidget):
 
         # Boîte de dialogue avec tableau stylisé
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, \
-            QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox, \
-            QPushButton, QLabel
+            QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Results for '{query}'")
@@ -550,13 +547,20 @@ class ModelsTab(QWidget):
         dl = QVBoxLayout(dialog)
         dl.setSpacing(8)
 
+        # Pagination : la liste peut être volumineuse (plus de 50 modèles), on
+        # affiche PAGE_SIZE lignes à la fois pour ne pas figer l'interface.
+        PAGE_SIZE = 500
+        total = len(results)
+        n_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = [0]  # page courante (liste pour mutation depuis les closures)
+
         # En-tête
-        header = QLabel(f"🔍 {len(results)} model(s) found — double-click to see files")
+        header = QLabel()
         header.setStyleSheet("font-weight: bold; font-size: 14px; padding: 8px;")
         dl.addWidget(header)
 
         # Tableau
-        table = QTableWidget(len(results), 6)
+        table = QTableWidget(0, 6)
         table.setHorizontalHeaderLabels(["Model", "Author", "Downloads", "Total Size", "Type", "HF Page"])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -569,68 +573,116 @@ class ModelsTab(QWidget):
         table.verticalHeader().setVisible(False)
         table.setShowGrid(True)
 
-        for i, r in enumerate(results):
-            # Nom
-            name = r["name"]
-            if r["is_rocmfp4"]:
-                name = "🔴 " + name
-            name_item = QTableWidgetItem(name)
-            name_item.setToolTip(r["id"])
-            table.setItem(i, 0, name_item)
-
-            # Auteur
-            table.setItem(i, 1, QTableWidgetItem(r["author"]))
-
-            # Téléchargements (formaté)
-            dl_count = r["downloads"]
-            if dl_count >= 1000000:
-                dl_str = f"⬇️ {dl_count/1000000:.1f}M"
-            elif dl_count >= 1000:
-                dl_str = f"⬇️ {dl_count/1000:.0f}K"
+        def _update_header():
+            if n_pages > 1:
+                header.setText(
+                    f"🔍 {total} model(s) found — page {page[0] + 1}/{n_pages} — "
+                    "double-click to see files"
+                )
             else:
-                dl_str = f"⬇️ {dl_count}"
-            dl_item = QTableWidgetItem(dl_str)
-            dl_item.setTextAlignment(Qt.AlignCenter)
-            table.setItem(i, 2, dl_item)
+                header.setText(f"🔍 {total} model(s) found — double-click to see files")
 
-            # Taille totale
-            total = r.get("total_size", 0)
-            if total > 0:
-                if total >= 1024**3:
-                    size_str = f"{total/(1024**3):.1f} GB"
-                elif total >= 1024**2:
-                    size_str = f"{total/(1024**2):.1f} MB"
+        def _fill_page(p):
+            """Remplit le tableau avec la page `p` des résultats."""
+            start = p * PAGE_SIZE
+            end = min(start + PAGE_SIZE, total)
+            slice_results = results[start:end]
+            table.setRowCount(len(slice_results))
+            for local_i, r in enumerate(slice_results):
+                # Nom
+                name = r["name"]
+                if r["is_rocmfp4"]:
+                    name = "🔴 " + name
+                name_item = QTableWidgetItem(name)
+                name_item.setToolTip(r["id"])
+                table.setItem(local_i, 0, name_item)
+
+                # Auteur
+                table.setItem(local_i, 1, QTableWidgetItem(r["author"]))
+
+                # Téléchargements (formaté)
+                dl_count = r["downloads"]
+                if dl_count >= 1000000:
+                    dl_str = f"⬇️ {dl_count/1000000:.1f}M"
+                elif dl_count >= 1000:
+                    dl_str = f"⬇️ {dl_count/1000:.0f}K"
+                else:
+                    dl_str = f"⬇️ {dl_count}"
+                dl_item = QTableWidgetItem(dl_str)
+                dl_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(local_i, 2, dl_item)
+
+                # Taille totale
+                total_size = r.get("total_size", 0)
+                if total_size > 0:
+                    if total_size >= 1024**3:
+                        size_str = f"{total_size/(1024**3):.1f} GB"
+                    elif total_size >= 1024**2:
+                        size_str = f"{total_size/(1024**2):.1f} MB"
+                    else:
+                        size_str = "—"
                 else:
                     size_str = "—"
-            else:
-                size_str = "—"
-            size_item = QTableWidgetItem(size_str)
-            size_item.setTextAlignment(Qt.AlignCenter)
-            table.setItem(i, 3, size_item)
+                size_item = QTableWidgetItem(size_str)
+                size_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(local_i, 3, size_item)
 
-            # Type
-            type_text = "ROCmFP4" if r["is_rocmfp4"] else "GGUF"
-            type_item = QTableWidgetItem(type_text)
-            type_item.setTextAlignment(Qt.AlignCenter)
-            if r["is_rocmfp4"]:
-                type_item.setForeground(QColor("#ff4d00"))
-            table.setItem(i, 4, type_item)
+                # Type
+                type_text = "ROCmFP4" if r["is_rocmfp4"] else "GGUF"
+                type_item = QTableWidgetItem(type_text)
+                type_item.setTextAlignment(Qt.AlignCenter)
+                if r["is_rocmfp4"]:
+                    type_item.setForeground(QColor("#ff4d00"))
+                table.setItem(local_i, 4, type_item)
 
-            # Bouton lien HF
-            if r.get("id"):
-                hf_btn = QPushButton("Open")
-                hf_btn.setFlat(True)
-                hf_btn.setStyleSheet("QPushButton { border: none; background: transparent; color: #1a73e8; font-size: 12px; padding: 2px 6px; text-decoration: underline; } QPushButton:hover { color: #e94560; }")
-                _hf_id = r["id"]
-                hf_btn.clicked.connect(lambda checked, hf_id=_hf_id: self._open_hf_page(hf_id))
-                table.setCellWidget(i, 5, hf_btn)
-            else:
-                table.setItem(i, 5, QTableWidgetItem("—"))
+                # Bouton lien HF
+                if r.get("id"):
+                    hf_btn = QPushButton("Open")
+                    hf_btn.setFlat(True)
+                    hf_btn.setStyleSheet("QPushButton { border: none; background: transparent; color: #1a73e8; font-size: 12px; padding: 2px 6px; text-decoration: underline; } QPushButton:hover { color: #e94560; }")
+                    _hf_id = r["id"]
+                    hf_btn.clicked.connect(lambda checked, hf_id=_hf_id: self._open_hf_page(hf_id))
+                    table.setCellWidget(local_i, 5, hf_btn)
+                else:
+                    table.setItem(local_i, 5, QTableWidgetItem("—"))
 
         dl.addWidget(table)
 
         # Double-clic sur une ligne → ouvre les fichiers
         table.cellDoubleClicked.connect(dialog.accept)
+
+        # Navigation de page (affichée uniquement si plusieurs pages)
+        if n_pages > 1:
+            page_nav = QHBoxLayout()
+            page_nav.addStretch()
+            prev_btn = QPushButton("◀ Prev")
+            next_btn = QPushButton("Next ▶")
+            page_label = QLabel()
+            page_label.setStyleSheet("color: #888; min-width: 60px;")
+            page_nav.addWidget(prev_btn)
+            page_nav.addWidget(page_label)
+            page_nav.addWidget(next_btn)
+            page_nav.addStretch()
+            dl.addLayout(page_nav)
+
+            def _update_page_buttons():
+                prev_btn.setEnabled(page[0] > 0)
+                next_btn.setEnabled(page[0] < n_pages - 1)
+                page_label.setText(f"{page[0] + 1} / {n_pages}")
+
+            def _go(p):
+                page[0] = max(0, min(p, n_pages - 1))
+                _fill_page(page[0])
+                _update_header()
+                _update_page_buttons()
+
+            prev_btn.clicked.connect(lambda: _go(page[0] - 1))
+            next_btn.clicked.connect(lambda: _go(page[0] + 1))
+            _update_page_buttons()
+
+        # Remplir la première page
+        _fill_page(0)
+        _update_header()
 
         # Boutons
         btn_layout = QHBoxLayout()
@@ -650,8 +702,10 @@ class ModelsTab(QWidget):
         if dialog.exec() == QDialog.Accepted:
             row = table.currentRow()
             if row >= 0:
-                selected = results[row]
-                self._show_model_files(selected["id"])
+                global_row = page[0] * PAGE_SIZE + row
+                if global_row < total:
+                    selected = results[global_row]
+                    self._show_model_files(selected["id"])
 
     def _show_model_files(self, repo_id: str):
         from src.utils.huggingface_api import HuggingFaceAPI

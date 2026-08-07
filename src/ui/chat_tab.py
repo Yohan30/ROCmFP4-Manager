@@ -27,6 +27,10 @@ class LLMRequestThread(QThread):
         self.url = url
         self.payload = payload
         self.api_key = api_key
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
 
     def run(self):
         import requests
@@ -41,6 +45,9 @@ class LLMRequestThread(QThread):
             response.raise_for_status()
 
             for line in response.iter_lines(decode_unicode=True):
+                if self._stop_flag:
+                    response.close()
+                    break
                 if line:
                     if line.startswith("data: "):
                         data_str = line[6:]
@@ -51,7 +58,7 @@ class LLMRequestThread(QThread):
                             choices = data.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {})
-                                content = delta.get("content", "")
+                                content = delta.get("content", "") or delta.get("reasoning_content", "")
                                 if content:
                                     self.token_received.emit(content)
                         except json.JSONDecodeError:
@@ -73,6 +80,10 @@ class ResponsesRequestThread(QThread):
         self.url = url
         self.payload = payload
         self.api_key = api_key
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
 
     def run(self):
         import requests
@@ -88,6 +99,9 @@ class ResponsesRequestThread(QThread):
 
             current_event = None
             for line in response.iter_lines(decode_unicode=True):
+                if self._stop_flag:
+                    response.close()
+                    break
                 if not line:
                     continue
 
@@ -418,7 +432,8 @@ class ChatTab(QWidget):
         api_key = self.config.get("api_key", "") if self.config.get("api_key_enabled", False) else ""
         api_mode = self.config.get("api_mode", "chat_completions")
 
-        if api_mode == "responses":
+        # Auto-détection : si l'adaptateur Responses tourne, utiliser Responses, sinon Chat Completions
+        if api_mode == "responses" and self.server.adapter_running:
             self._send_responses_request(text, api_key)
         else:
             self._send_chat_request(text, api_key)
@@ -551,8 +566,8 @@ class ChatTab(QWidget):
 
     def _stop_generation(self):
         if self._current_thread and self._current_thread.isRunning():
-            self._current_thread.terminate()
-            self._current_thread.wait()
+            self._current_thread.stop()
+            self._current_thread.wait(3000)
             self._current_thread = None
             self.writing_indicator.setVisible(False)
             self.send_btn.setEnabled(True)

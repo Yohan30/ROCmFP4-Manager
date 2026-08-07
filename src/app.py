@@ -43,7 +43,7 @@ class ROCmFP4App(QApplication):
         # Initialiser la langue depuis la config (défaut: anglais)
         set_language(self.config.get("language", "en"))
         self.server = ServerController(self.config)
-        self.rocmfpx = ROCmFPXManager()
+        self.rocmfpx = ROCmFPXManager(config=self.config)
         self.models_mgr = ModelManager(self.config.models_path)
         self.autostart = AutostartManager()
 

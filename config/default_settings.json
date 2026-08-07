@@ -1,5 +1,29 @@
 {
   "rocmfpx_path": "",
+  "rocmfpx_active_profile": "charlie-main",
+  "rocmfpx_profiles": {
+    "charlie-main": {
+      "repo_url": "https://github.com/charlie12345/ROCmFPX.git",
+      "branch": "main",
+      "build_script": "scripts/build-strix-rocmfp4-mtp.sh",
+      "build_dir": "build-strix-rocmfp4",
+      "label": "ROCmFPX Standard (charlie12345)"
+    },
+    "ciru-dualview": {
+      "repo_url": "https://github.com/ciru-ai/ROCmFPX.git",
+      "branch": "agent/laguna-radv-device-lost-20260724",
+      "build_script": "scripts/build-laguna-strix-vulkan.sh",
+      "build_dir": "build-laguna-strix-vulkan",
+      "label": "CIRU Laguna V2"
+    },
+    "rocmfpx-v2": {
+      "repo_url": "https://github.com/charlie12345/ROCmFPX.git",
+      "branch": "laguna-dflash-fixes",
+      "build_script": "scripts/build-strix-rocmfp4-mtp.sh",
+      "build_dir": "build-strix-rocmfp4",
+      "label": "ROCmFPX v2 (Laguna DFlash fixes)"
+    }
+  },
   "models_path": "~/models/rocmfp4",
   "lmstudio_path": "~/.lmstudio/models",
   "port": 1412,
@@ -27,11 +51,20 @@
   "last_model": "",
   "last_mtp_model": "",
   "last_mmproj_model": "",
+  "last_draft_model": "",
+  "chat_template": "",
   "api_mode": "chat_completions",
   "advanced_args": "",
+  "env_hsa_override_gfx": true,
+  "env_unified_memory": true,
+  "env_prepend_ld_library_path": true,
   "theme": "dark",
   "language": "en",
   "model_advanced_args": {},
   "accent_color": "#5555ff",
-  "bg_color": "#121212"
+  "bg_color": "#121212",
+  "ds4_fused_decode": true,
+  "ds4_expert_top_k": 4,
+  "ds4_prefill": "exact",
+  "ds4_spec_q": 4
 }

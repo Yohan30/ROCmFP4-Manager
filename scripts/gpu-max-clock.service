@@ -1,0 +1,13 @@
+[Unit]
+Description=Force AMD GPU to max clock (3100 MHz)
+After=sysfs.target
+Wants=sysfs.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/bash -c 'while [ -z "$(ls /sys/class/drm/card*/device/pp_od_clk_voltage 2>/dev/null | head -1)" ]; do sleep 1; done'
+ExecStart=/usr/bin/bash -c 'CARD=$(ls -d /sys/class/drm/card*/device/pp_od_clk_voltage 2>/dev/null | head -1 | sed "s|/device/pp_od_clk_voltage||"); echo manual > "$CARD/device/power_dpm_force_performance_level" && echo "s 0 3100" > "$CARD/device/pp_od_clk_voltage" && echo "s 1 3100" >> "$CARD/device/pp_od_clk_voltage" && echo c >> "$CARD/device/pp_od_clk_voltage" && echo "GPU ($CARD) locked at:" && cat "$CARD/device/pp_dpm_sclk"'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

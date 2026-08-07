@@ -585,7 +585,7 @@ class ResponsesHandler(BaseHTTPRequestHandler):
             return
 
         # Stocker pour previous_response_id
-        store = body.get("store", True)
+        store = original_body.get("store", True)
         if store:
             input_items = self._extract_input_items(original_body)
             self.adapter.store.put(responses_resp["id"], responses_resp, input_items)
@@ -736,7 +736,10 @@ class ResponsesAdapter:
         self._logs: list[str] = []
 
     def _log(self, msg: str, *args):
-        log_line = msg % args if args else msg
+        try:
+            log_line = msg % args if args else msg
+        except (TypeError, ValueError):
+            log_line = msg + " " + " ".join(str(a) for a in args) if args else msg
         self._logs.append(log_line)
         if len(self._logs) > 200:
             self._logs = self._logs[-200:]

@@ -25,6 +25,7 @@ models/
 # Config utilisateur (contient des clés API)
 settings.json
 *.conf
+.webui_secret_key
 
 # Logs
 *.log

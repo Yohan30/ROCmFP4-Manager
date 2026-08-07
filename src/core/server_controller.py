@@ -35,7 +35,7 @@ class ServerController:
         self._detect_existing_server()
 
     def _get_expected_binary_paths(self) -> list[Path]:
-        """Retourne les chemins possibles du binaire ROCmFPX llama-server."""
+        """Retourne les chemins possibles du binaire (profil actif d'abord)."""
         paths = []
 
         # Depuis le PATH
@@ -43,19 +43,26 @@ class ServerController:
         if which.returncode == 0:
             paths.append(Path(which.stdout.strip()).resolve())
 
-        # Depuis la config ROCmFPX
-        rocmfpx_path = self.config.get("rocmfpx_path", "")
-        if rocmfpx_path:
-            candidates = [
-                Path(rocmfpx_path) / "build-strix-rocmfp4" / "bin" / "llama-server",
-                Path(rocmfpx_path) / "build" / "bin" / "llama-server",
-            ]
-            for c in candidates:
-                resolved = c.resolve()
-                if resolved.exists():
-                    paths.append(resolved)
+        # Profil actif d'abord
+        active_profile = self.active_profile
+        active = self._find_in_profile(active_profile, "llama-server")
+        if active:
+            paths.append(active.resolve())
 
-        # Fallback : chemin relatif au projet
+        # Puis autres profils
+        profiles = self.config.get("rocmfpx_profiles", {})
+        for pid in profiles:
+            if pid == active_profile:
+                continue
+            p = self._find_in_profile(pid, "llama-server")
+            if p:
+                paths.append(p.resolve())
+
+        # Legacy + relatif
+        legacy = Path.home() / "ROCMFPX" / "build-strix-rocmfp4" / "bin" / "llama-server"
+        if legacy.exists():
+            paths.append(legacy.resolve())
+
         local = Path(__file__).parent.parent.parent / "build-strix-rocmfp4" / "bin" / "llama-server"
         if local.exists():
             paths.append(local.resolve())
@@ -199,34 +206,77 @@ class ServerController:
                 pass
 
     def _find_llama_server(self) -> Optional[Path]:
-        """Cherche le binaire llama-server dans le PATH ou le dossier ROCmFPX."""
+        """Cherche le binaire llama-server : profil actif d'abord, puis fallback."""
         # Dans le PATH
         which = subprocess.run(["which", "llama-server"], capture_output=True, text=True)
         if which.returncode == 0:
             return Path(which.stdout.strip())
 
-        # Dans le dossier ROCmFPX
-        rocmfpx_path = self.config.get("rocmfpx_path", "")
-        if rocmfpx_path:
-            candidates = [
-                Path(rocmfpx_path) / "build-strix-rocmfp4" / "bin" / "llama-server",
-                Path(rocmfpx_path) / "build" / "bin" / "llama-server",
-            ]
-            for c in candidates:
-                if c.exists():
-                    return c
+        # 1. Profil actif en priorité (spécifique au modèle si dispo)
+        active_profile = self.active_profile
+        active = self._find_in_profile(active_profile, "llama-server")
+        if active:
+            return active
 
-        # Dans le répertoire parent
+        # 2. Fallback : tous les autres profils
+        profiles = self.config.get("rocmfpx_profiles", {})
+        for pid in profiles:
+            if pid == active_profile:
+                continue
+            p = self._find_in_profile(pid, "llama-server")
+            if p:
+                return p
+
+        # 3. Legacy ~/ROCMFPX
+        legacy = Path.home() / "ROCMFPX" / "build-strix-rocmfp4" / "bin" / "llama-server"
+        if legacy.exists():
+            return legacy
+
+        # 4. Relatif projet
         local = Path(__file__).parent.parent.parent / "build-strix-rocmfp4" / "bin" / "llama-server"
         if local.exists():
             return local
 
         return None
 
+    def _find_in_profile(self, profile_id: str, binary: str) -> Optional[Path]:
+        """Cherche un binaire dans le dossier build d'un profil donné."""
+        profiles = self.config.get("rocmfpx_profiles", {})
+        info = profiles.get(profile_id, {})
+        build_dir = info.get("build_dir", "build-strix-rocmfp4")
+        profiles_base = Path.home() / "ROCmFPX-profiles"
+        candidate = profiles_base / profile_id / build_dir / "bin" / binary
+        if candidate.exists():
+            return candidate
+        # Legacy
+        if profile_id == "charlie-main":
+            legacy = Path.home() / "ROCMFPX" / build_dir / "bin" / binary
+            if legacy.exists():
+                return legacy
+        return None
+
+    @property
+    def active_profile(self) -> str:
+        """Retourne le profil ROCmFPX actif, spécifique au modèle si dispo."""
+        model_path = self.config.get("last_model", "")
+        return self.config.get_model_setting(model_path, "rocmfpx_active_profile", "charlie-main")
+
+    @property
+    def active_profile_label(self) -> str:
+        """Label lisible du profil actif."""
+        profiles = self.config.get("rocmfpx_profiles", {})
+        pid = self.active_profile
+        info = profiles.get(pid, {})
+        return info.get("label", pid)
+
     def start(self, model_path: str, mtp_path: str = "", mmproj_path: str = "") -> bool:
-        """Démarre le serveur llama-server avec le modèle donné."""
+        """Démarre le serveur avec le modèle donné."""
         if self.is_running:
             return False
+
+        # Lucebox / DeepSeek V4: détection automatique
+        if self.config.is_lucebox_model(model_path):
+            return self._start_lucebox(model_path)
 
         server_bin = self._find_llama_server()
         if not server_bin:
@@ -245,9 +295,7 @@ class ServerController:
         self._model_name = Path(model_path).name
         self._log_buffer = []
 
-        env = os.environ.copy()
-        env["HSA_OVERRIDE_GFX_VERSION"] = "11.5.1"
-        env["GGML_HIP_ENABLE_UNIFIED_MEMORY"] = "1"
+        env = self.config.build_server_env(server_bin, model_path)
 
         success = self._proc.start(full_args, log_path=log_file, env=env)
         if success:
@@ -327,6 +375,68 @@ class ServerController:
         if h > 0:
             return f"{h}h {m}m"
         return f"{m}m {s}s"
+
+    # ------------------------------------------------------------------
+    # Lucebox / dflash_server (DeepSeek V4)
+    # ------------------------------------------------------------------
+
+    def _find_dflash_server(self) -> Optional[Path]:
+        """Cherche le binaire dflash_server."""
+        paths = [
+            Path.home() / "lucebox" / "server" / "build-hip" / "dflash_server",
+        ]
+        for p in paths:
+            if p.exists():
+                return p
+        # Dans le PATH
+        which = subprocess.run(["which", "dflash_server"], capture_output=True, text=True)
+        if which.returncode == 0:
+            return Path(which.stdout.strip())
+        return None
+
+    def _start_lucebox(self, model_path: str) -> bool:
+        """Démarre dflash_server pour DeepSeek V4."""
+        server_bin = self._find_dflash_server()
+        if not server_bin:
+            raise FileNotFoundError(
+                "dflash_server introuvable. Installez Lucebox :\n"
+                "git clone https://github.com/Luce-Org/lucebox.git ~/lucebox"
+            )
+
+        args = self.config.build_lucebox_args(model_path)
+        full_args = [str(server_bin)] + args
+
+        log_dir = Path.home() / ".cache" / "rocmfp4-manager" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "llama-server.log"
+
+        self._model_name = Path(model_path).name
+        self._log_buffer = []
+
+        env = os.environ.copy()
+        g = lambda k, d: self.config.get_model_setting(model_path, k, d)
+        if g("env_hsa_override_gfx", True):
+            env["HSA_OVERRIDE_GFX_VERSION"] = "11.5.1"
+        if g("env_unified_memory", True):
+            env["GGML_HIP_ENABLE_UNIFIED_MEMORY"] = "1"
+        # Lucebox DSpark env vars
+        env["DFLASH_DS4_SPEC"] = "1"
+        env["DFLASH_DS4_FUSED_VERIFY"] = "1"
+        env["DFLASH_DS4_SPEC_Q"] = str(self.config.get("ds4_spec_q", 4))
+        env["LUCE_MMVQ_MAX_NCOLS"] = "4"
+
+        draft = self.config.get("last_draft_model", "")
+        if draft:
+            env["DFLASH_DS4_DRAFT"] = draft
+
+        success = self._proc.start(full_args, log_path=log_file, env=env)
+        if success:
+            self._start_time = time.time()
+            self._running = True
+            self._start_monitoring(log_file)
+            self._notify("started", {"model": self._model_name, "pid": self.pid})
+
+        return success
 
     # ------------------------------------------------------------------
     # Adaptateur Responses API

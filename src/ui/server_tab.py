@@ -76,6 +76,10 @@ class ServerTab(QWidget):
         self.port_label = QLabel(f"Port: {self.config.port}")
         status_grid.addWidget(self.port_label, 0, 2)
 
+        self.profile_label = QLabel(_("rocmfpx_profile_used") + ": " + self.server.active_profile_label)
+        self.profile_label.setStyleSheet("font-family: monospace; font-size: 12px;")
+        status_grid.addWidget(self.profile_label, 0, 3)
+
         self.uptime_label = QLabel("Uptime: —")
         status_grid.addWidget(self.uptime_label, 1, 1)
 
@@ -136,7 +140,7 @@ class ServerTab(QWidget):
             row.addWidget(url_label, 1)
             self._url_labels[label] = url_label
 
-            if label == "Web Interface":
+            if label == "Health":
                 # Sélecteur de mode API (Chat Completions / Responses)
                 mode_label = QLabel(_("api_mode") + ":")
                 row.addWidget(mode_label, 0)
@@ -175,6 +179,16 @@ class ServerTab(QWidget):
                 open_btn = QPushButton("Open")
                 open_btn.clicked.connect(lambda: self._open_webui())
                 row.addWidget(open_btn, 0)
+
+            if label == "Web Interface":
+                # Sélecteur de version ROCmFPX
+                rocm_label = QLabel(_("rocmfpx_profile") + ":")
+                row.addWidget(rocm_label, 0)
+                self.api_rocm_combo = QComboBox()
+                self.api_rocm_combo.setMinimumWidth(280)
+                self._populate_api_rocm_combo()
+                self.api_rocm_combo.currentIndexChanged.connect(self._on_api_rocm_profile_changed)
+                row.addWidget(self.api_rocm_combo, 0)
 
             api_layout.addLayout(row)
 
@@ -376,6 +390,10 @@ class ServerTab(QWidget):
         except FileNotFoundError as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Erreur", str(e))
+        except ValueError as e:
+            # Arguments avancés malformés (ex: guillemet non fermé)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Erreur", str(e))
 
     def _on_stop(self):
         self.server.stop()
@@ -405,6 +423,8 @@ class ServerTab(QWidget):
             self.mem_label.setText(f"Memory: {mem:.0f} MB" if mem else "Memory: —")
             self.pid_label.setText(f"PID: {self.server.pid}")
             self.model_label.setText(f"Model: {self.config.get('last_model', '—')}")
+        self.profile_label.setText(_("rocmfpx_profile_used") + ": " + self.server.active_profile_label)
+        self._sync_api_rocm_combo()
         self._refresh_api_mode_label()
 
     def _refresh_api_mode_label(self):
@@ -565,3 +585,52 @@ class ServerTab(QWidget):
         for label, url in url_map.items():
             if label in self._url_labels:
                 self._url_labels[label].setText(url)
+
+    # ------------------------------------------------------------------
+    # Sélecteur de version ROCmFPX dans API Endpoints
+    # ------------------------------------------------------------------
+
+    def _populate_api_rocm_combo(self):
+        """Remplit le sélecteur de profil ROCmFPX avec les profils disponibles."""
+        self.api_rocm_combo.blockSignals(True)
+        self.api_rocm_combo.clear()
+        profiles = self.config.get("rocmfpx_profiles", {})
+        model_path = self.config.get("last_model", "")
+        active = self.config.get_model_setting(model_path, "rocmfpx_active_profile", "charlie-main")
+        for pid, info in profiles.items():
+            label = info.get("label", pid)
+            self.api_rocm_combo.addItem(label, pid)
+            if pid == active:
+                self.api_rocm_combo.setCurrentIndex(self.api_rocm_combo.count() - 1)
+        self.api_rocm_combo.blockSignals(False)
+
+    def _sync_api_rocm_combo(self):
+        """Synchronise le combo avec la config (sans déclencher d'événement)."""
+        model_path = self.config.get("last_model", "")
+        active = self.config.get_model_setting(model_path, "rocmfpx_active_profile", "charlie-main")
+        for i in range(self.api_rocm_combo.count()):
+            if self.api_rocm_combo.itemData(i) == active:
+                if self.api_rocm_combo.currentIndex() != i:
+                    self.api_rocm_combo.blockSignals(True)
+                    self.api_rocm_combo.setCurrentIndex(i)
+                    self.api_rocm_combo.blockSignals(False)
+                return
+
+    def _on_api_rocm_profile_changed(self, index: int):
+        """Callback quand l'utilisateur change la version ROCmFPX dans API Endpoints.
+        Sauvegarde dans le profil du modèle si un modèle est sélectionné."""
+        if index < 0:
+            return
+        new_profile = self.api_rocm_combo.itemData(index)
+        model_path = self.config.get("last_model", "")
+        current = self.config.get_model_setting(model_path, "rocmfpx_active_profile", "charlie-main")
+        if new_profile == current:
+            return
+
+        if model_path:
+            self.config.set_model_settings(model_path, {"rocmfpx_active_profile": new_profile})
+        else:
+            self.config.set("rocmfpx_active_profile", new_profile)
+        self.config.save()
+        # Mettre à jour le label dans la barre de statut
+        self.profile_label.setText(_("rocmfpx_profile_used") + ": " + self.server.active_profile_label)

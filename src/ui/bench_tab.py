@@ -146,6 +146,15 @@ class BenchTab(QWidget):
             self._notify_error("No model selected in configuration.")
             return
 
+        # Lucebox/DeepSeek V4 models are not supported by llama-bench
+        if self.config.is_lucebox_model(model_path):
+            self._notify_error(
+                "llama-bench cannot benchmark DeepSeek V4 Flash models.\n"
+                "These models use the dflash_server runtime (Lucebox), not llama.cpp.\n"
+                "Benchmark via the dflash_server directly."
+            )
+            return
+
         backends = [self.backend_combo.currentText()]
         if self.bench_comparison_check.isChecked():
             alt = "ROCm0" if backends[0] == "Vulkan0" else "Vulkan0"

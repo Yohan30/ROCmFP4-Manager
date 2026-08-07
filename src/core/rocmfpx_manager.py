@@ -1,4 +1,4 @@
-"""Gestion du clonage, build et mise à jour de ROCmFPX."""
+"""Gestion du clonage, build et mise à jour de ROCmFPX (multi-profils)."""
 
 import os
 import shutil
@@ -7,8 +7,37 @@ import threading
 from pathlib import Path
 from typing import Optional, Callable
 
-REPO_URL = "https://github.com/charlie12345/ROCmFPX.git"
-STRIX_BUILD_SCRIPT = "scripts/build-strix-rocmfp4-mtp.sh"
+# --- Profils prédéfinis ---
+DEFAULT_PROFILES = {
+    "charlie-main": {
+        "repo_url": "https://github.com/charlie12345/ROCmFPX.git",
+        "branch": "main",
+        "build_script": "scripts/build-strix-rocmfp4-mtp.sh",
+        "build_dir": "build-strix-rocmfp4",
+        "label": "ROCmFPX Standard (charlie12345)",
+    },
+    "ciru-dualview": {
+        "repo_url": "https://github.com/ciru-ai/ROCmFPX.git",
+        "branch": "agent/laguna-radv-device-lost-20260724",
+        "build_script": "scripts/build-laguna-strix-vulkan.sh",
+        "build_dir": "build-laguna-strix-vulkan",
+        "label": "CIRU Laguna V2",
+    },
+    "rocmfpx-v2": {
+        "repo_url": "https://github.com/charlie12345/ROCmFPX.git",
+        # Branche locale portant les correctifs DFlash Laguna non mergés en amont
+        # (PRs #47 laguna::t_layer_inp et #48 dflash::aux_norm + attn_gate).
+        # Ne PAS lancer "Update" sur ce profil : reset --hard ramènerait le
+        # code au main upstream et effacerait les correctifs.
+        "branch": "laguna-dflash-fixes",
+        "build_script": "scripts/build-strix-rocmfp4-mtp.sh",
+        "build_dir": "build-strix-rocmfp4",
+        "label": "ROCmFPX v2 (Laguna DFlash fixes)",
+    },
+}
+
+# Répertoire parent pour tous les profils
+PROFILES_BASE = Path.home() / "ROCmFPX-profiles"
 
 # Dépendances nécessaires à la compilation selon le gestionnaire de paquets
 DEPENDENCIES = {
@@ -36,13 +65,124 @@ DEPENDENCIES = {
 
 
 class ROCmFPXManager:
-    """Clone, build et met à jour le fork ROCmFPX de llama.cpp."""
+    """Clone, build et met à jour une version de ROCmFPX selon un profil.
+    
+    Supporte plusieurs profils (ex: charlie-main, ciru-dualview).
+    Un seul profil est actif à la fois. Chaque profil vit dans son
+    propre sous-dossier de ~/ROCmFPX-profiles/.
+    """
 
-    def __init__(self, base_path: Optional[Path] = None):
-        self.base_path = base_path or Path.home() / "ROCMFPX"
+    def __init__(self, config=None):
+        """config: instance de Config (optionnelle, pour lire les profils)."""
+        self._config = config
         self._listeners: list[Callable] = []
         self._current_commit: str = ""
         self._remote_commit: str = ""
+        self._active_profile: str = ""
+
+        # Déterminer le profil actif
+        if config:
+            self._active_profile = config.get("rocmfpx_active_profile", "charlie-main")
+        else:
+            self._active_profile = "charlie-main"
+
+        # Compatibilité ascendante : si l'ancien chemin ~/ROCMFPX existe, 
+        # migrer automatiquement vers le profil charlie-main
+        self._migrate_legacy_path()
+
+    # ------------------------------------------------------------------
+    # Gestion des profils
+    # ------------------------------------------------------------------
+
+    @property
+    def profiles(self) -> dict:
+        """Retourne le dictionnaire des profils (fusion defaults + config)."""
+        if self._config:
+            stored = self._config.get("rocmfpx_profiles", {})
+            # Fusion: les profils stockés écrasent les défauts
+            merged = {**DEFAULT_PROFILES, **stored}
+            return merged
+        return dict(DEFAULT_PROFILES)
+
+    @property
+    def active_profile(self) -> str:
+        # Toujours lire depuis la config si disponible (synchro avec ServerTab)
+        if self._config:
+            return self._config.get("rocmfpx_active_profile", self._active_profile or "charlie-main")
+        return self._active_profile or "charlie-main"
+
+    def set_active_profile(self, profile_id: str):
+        """Change le profil actif et sauvegarde."""
+        if profile_id not in self.profiles:
+            raise ValueError(f"Unknown profile: {profile_id}")
+        self._active_profile = profile_id
+        if self._config:
+            self._config.set("rocmfpx_active_profile", profile_id)
+            self._config.save()
+        # Réinitialiser les commits
+        self._current_commit = ""
+        self._remote_commit = ""
+
+    def get_profile(self, profile_id: str = None) -> dict:
+        """Retourne les infos d'un profil (ou du profil actif)."""
+        pid = profile_id or self._active_profile
+        return self.profiles.get(pid, {})
+
+    @property
+    def base_path(self) -> Path:
+        """Chemin racine du profil actif."""
+        # Compatibilité ascendante: si ~/ROCMFPX existe et qu'on est sur charlie-main
+        legacy = Path.home() / "ROCMFPX"
+        if self._active_profile == "charlie-main" and legacy.exists():
+            return legacy
+        return PROFILES_BASE / self._active_profile
+
+    @property
+    def build_path(self) -> Path:
+        profile = self.get_profile()
+        build_dir = profile.get("build_dir", "build-strix-rocmfp4")
+        return self.base_path / build_dir / "bin"
+
+    @property
+    def llama_server_path(self) -> Optional[Path]:
+        """Cherche llama-server dans le profil actif uniquement."""
+        p = self.build_path / "llama-server"
+        if p.exists():
+            return p
+        return None
+
+    @property
+    def llama_bench_path(self) -> Optional[Path]:
+        """Cherche llama-bench dans le profil actif uniquement."""
+        p = self.build_path / "llama-bench"
+        if p.exists():
+            return p
+        return None
+
+    def _migrate_legacy_path(self):
+        """Détecte l'ancien ~/ROCMFPX (sans profils) et l'associe à charlie-main."""
+        legacy = Path.home() / "ROCMFPX"
+        profile_dir = PROFILES_BASE / "charlie-main"
+        if legacy.exists() and not profile_dir.exists():
+            # Créer un lien symbolique pour que le nouveau chemin pointe vers l'ancien
+            PROFILES_BASE.mkdir(parents=True, exist_ok=True)
+            try:
+                profile_dir.symlink_to(legacy)
+            except OSError:
+                pass  # Pas grave si le symlink échoue, on utilisera legacy directement
+
+    # ------------------------------------------------------------------
+    # Propriétés de statut
+    # ------------------------------------------------------------------
+
+    @property
+    def is_installed(self) -> bool:
+        git_dir = self.base_path / ".git"
+        return git_dir.exists()
+
+    @property
+    def label(self) -> str:
+        return self.get_profile().get("label", self._active_profile)
 
     def add_listener(self, callback: Callable):
         self._listeners.append(callback)
@@ -54,37 +194,23 @@ class ROCmFPXManager:
             except Exception:
                 pass
 
-    @property
-    def is_installed(self) -> bool:
-        git_dir = self.base_path / ".git"
-        return git_dir.exists()
-
-    @property
-    def build_path(self) -> Path:
-        return self.base_path / "build-strix-rocmfp4" / "bin"
-
-    @property
-    def llama_server_path(self) -> Optional[Path]:
-        p = self.build_path / "llama-server"
-        return p if p.exists() else None
-
-    @property
-    def llama_bench_path(self) -> Optional[Path]:
-        p = self.build_path / "llama-bench"
-        return p if p.exists() else None
+    # ------------------------------------------------------------------
+    # Clonage
+    # ------------------------------------------------------------------
 
     def clone(self):
-        """Clone le dépôt ROCmFPX."""
+        """Clone le dépôt ROCmFPX pour le profil actif."""
+        profile = self.get_profile()
+        repo_url = profile.get("repo_url", "")
+        branch = profile.get("branch", "main")
+
         def task():
             self._notify("clone_start", None)
             try:
+                self.base_path.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(
-                    ["git", "clone", REPO_URL, str(self.base_path)],
+                    ["git", "clone", "--branch", branch, repo_url, str(self.base_path)],
                     check=True, capture_output=True, text=True
-                )
-                subprocess.run(
-                    ["git", "checkout", "main"],
-                    cwd=self.base_path, check=True, capture_output=True
                 )
                 self._current_commit = self._get_current_commit()
                 self._notify("clone_done", {"commit": self._current_commit})
@@ -92,6 +218,10 @@ class ROCmFPXManager:
                 self._notify("error", {"message": str(e.stderr or e.stdout)})
 
         threading.Thread(target=task, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Dépendances
+    # ------------------------------------------------------------------
 
     def _detect_package_manager(self) -> Optional[str]:
         """Détecte le gestionnaire de paquets disponible."""
@@ -175,8 +305,15 @@ class ROCmFPXManager:
             self._notify("error", {"message": f"Installation des dépendances: {e}"})
             return False
 
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+
     def build(self):
-        """Vérifie les dépendances puis lance la compilation pour Strix Halo."""
+        """Vérifie les dépendances puis lance la compilation pour le profil actif."""
+        profile = self.get_profile()
+        build_script = profile.get("build_script", "scripts/build-strix-rocmfp4-mtp.sh")
+
         def task():
             self._notify("build_start", None)
 
@@ -195,7 +332,7 @@ class ROCmFPXManager:
                 env = os.environ.copy()
                 env["JOBS"] = str(os.cpu_count() or 16)
 
-                script_path = self.base_path / STRIX_BUILD_SCRIPT
+                script_path = self.base_path / build_script
                 if not script_path.exists():
                     self._notify("error", {"message": f"Script introuvable: {script_path}"})
                     return
@@ -233,29 +370,43 @@ class ROCmFPXManager:
         """Vérifie si une mise à jour est disponible. Retourne True si oui."""
         if not self.is_installed:
             return False
+        branch = self.get_profile().get("branch", "main")
         try:
-            # Fetch
+            # Fetch ciblé sur la ref configurée (branche ou tag)
             subprocess.run(
-                ["git", "fetch", "origin"],
+                ["git", "fetch", "origin", branch],
                 cwd=self.base_path, check=True, capture_output=True, timeout=30
             )
             self._current_commit = self._get_current_commit()
-            self._remote_commit = self._get_remote_commit()
+            self._remote_commit = self._get_remote_commit(branch)
             return self._current_commit != self._remote_commit
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return False
 
     def update(self):
-        """Pull + rebuild."""
+        """Fetch + reset + rebuild pour le profil actif.
+        
+        Utilise git fetch + reset --hard FETCH_HEAD au lieu de git pull,
+        ce qui évite les problèmes de merge et fonctionne avec les tags.
+        """
+        branch = self.get_profile().get("branch", "main")
+
         def task():
             self._notify("update_start", None)
+            old_commit = self._get_current_commit()
             try:
+                # Fetch uniquement la ref cible
                 subprocess.run(
-                    ["git", "pull", "origin", "main"],
+                    ["git", "fetch", "origin", branch],
                     cwd=self.base_path, check=True, capture_output=True, timeout=60
                 )
+                # Reset dur sur FETCH_HEAD (marche pour branches ET tags)
+                subprocess.run(
+                    ["git", "reset", "--hard", "FETCH_HEAD"],
+                    cwd=self.base_path, check=True, capture_output=True, timeout=30
+                )
                 new_commit = self._get_current_commit()
-                self._notify("update_pulled", {"old": self._current_commit, "new": new_commit})
+                self._notify("update_pulled", {"old": old_commit, "new": new_commit})
                 self._current_commit = new_commit
                 self.build()
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -288,10 +439,21 @@ class ROCmFPXManager:
         except subprocess.CalledProcessError:
             return ""
 
-    def _get_remote_commit(self) -> str:
+    def _get_remote_commit(self, branch: str = "main") -> str:
+        """Résout le commit distant pour une branche ou un tag."""
+        # Essayer d'abord comme branche (origin/<name>)
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "origin/main"],
+                ["git", "rev-parse", f"origin/{branch}"],
+                cwd=self.base_path, capture_output=True, text=True, check=True
+            )
+            return result.stdout.strip()[:12]
+        except subprocess.CalledProcessError:
+            pass
+        # Fallback: tag ou ref directe
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", f"refs/tags/{branch}"],
                 cwd=self.base_path, capture_output=True, text=True, check=True
             )
             return result.stdout.strip()[:12]
