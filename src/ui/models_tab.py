@@ -21,6 +21,8 @@ class ModelsTab(QWidget):
 
     # Signal thread-safe pour les téléchargements
     _dl_signal = Signal(str, object)
+    # Signal émis quand un modèle est sélectionné (chemin du .gguf)
+    model_selected = Signal(str)
 
     def __init__(self, models_mgr: ModelManager, config: Config):
         super().__init__()
@@ -465,6 +467,7 @@ class ModelsTab(QWidget):
     def _select_model(self, path: str):
         self.config.set("last_model", path)
         self.config.save()
+        self.model_selected.emit(path)
         QMessageBox.information(self, "Model selected",
                                 f"✅ {Path(path).name}\nYou can start the server from the Server tab.")
 

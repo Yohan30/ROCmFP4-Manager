@@ -69,9 +69,9 @@ class ROCmFP4App(QApplication):
         QTimer.singleShot(5000, self._check_rocmfpx_update)
 
     def cleanup(self):
-        """Arrête proprement le serveur et les processus au quitting."""
-        if hasattr(self, 'server') and self.server.is_running:
-            self.server.stop()
+        """Arrête proprement le serveur, l'adaptateur et les processus au quitting."""
+        if hasattr(self, 'server'):
+            self.server.stop()  # stop() gère aussi l'adaptateur même si le serveur est déjà mort
         if hasattr(self, 'system_tray'):
             self.system_tray.hide()
 

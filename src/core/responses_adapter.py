@@ -15,10 +15,20 @@ import time
 import uuid
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from typing import Optional
 from urllib.parse import urlparse
 
 import requests
+
+
+# ---------------------------------------------------------------------------
+# Serveur HTTP multi-thread
+# ---------------------------------------------------------------------------
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTPServer avec un thread par requête (évite le blocage)."""
+    daemon_threads = True
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +256,22 @@ class ResponseTranslator:
             msg = choice.get("message", {})
             finish_reason = choice.get("finish_reason", "stop")
 
-            # Message texte
-            content = msg.get("content", "")
-            item_id = _gen_item_id("msg")
+            # Reasoning/thinking (DeepSeek, Laguna, etc.)
+            reasoning = msg.get("reasoning_content", "")
+            if reasoning:
+                items.append({
+                    "id": _gen_item_id("rs"),
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": [
+                        {"type": "reasoning_text", "text": reasoning, "annotations": []}
+                    ],
+                })
 
+            # Message texte - toujours présent, utilise le reasoning comme fallback si content vide
+            content = msg.get("content", "")
+            display_text = content if content else reasoning
+            item_id = _gen_item_id("msg")
             output_item: dict = {
                 "id": item_id,
                 "type": "message",
@@ -258,7 +280,7 @@ class ResponseTranslator:
                 "content": [
                     {
                         "type": "output_text",
-                        "text": content if content else "",
+                        "text": display_text,
                         "annotations": [],
                         "logprobs": [],
                     }
@@ -283,14 +305,20 @@ class ResponseTranslator:
 
     @staticmethod
     def _extract_text(output_items: list[dict]) -> str:
-        """Extrait le texte concaténé des output_items."""
+        """Extrait le texte concaténé des output_items (reasoning + message)."""
         texts = []
         for item in output_items:
-            if item.get("type") == "message":
+            if item.get("type") == "reasoning":
+                for content_part in item.get("content", []):
+                    if content_part.get("type") == "reasoning_text":
+                        texts.append(content_part.get("text", ""))
+            elif item.get("type") == "message":
                 for content_part in item.get("content", []):
                     if content_part.get("type") == "output_text":
-                        texts.append(content_part.get("text", ""))
-        return "\n".join(texts)
+                        t = content_part.get("text", "")
+                        if t:
+                            texts.append(t)
+        return "\n".join(texts) if texts else (output_items[-1].get("content", [{}])[-1].get("text", "") if output_items else "")
 
     @staticmethod
     def _translate_usage(usage: dict | None) -> dict:
@@ -325,8 +353,8 @@ class StreamTranslator:
     """Convertit un flux SSE Chat Completions en flux SSE Responses."""
 
     @staticmethod
-    def translate_events(chat_sse_line: str, response_id: str,
-                          item_id: str, request_body: dict) -> list[str]:
+    def translate_events(chat_sse_line: str, reasoning_item_id: str,
+                          message_item_id: str) -> list[str]:
         """Traduit une ligne SSE Chat Completions en événements Responses.
 
         Retourne une liste de chaînes SSE à envoyer.
@@ -336,11 +364,8 @@ class StreamTranslator:
 
         data_str = chat_sse_line[6:]
         if data_str.strip() == "[DONE]":
-            # Événement de fin
-            return [
-                f"event: response.completed\ndata: {json.dumps({'response': {'id': response_id, 'object': 'response', 'status': 'completed'}})}\n\n",
-                f"data: [DONE]\n\n",
-            ]
+            # La fin est gérée par _handle_stream après la boucle
+            return []
 
         try:
             data = json.loads(data_str)
@@ -356,20 +381,28 @@ class StreamTranslator:
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
+        # Token de reasoning (DeepSeek, Laguna...)
+        reasoning = delta.get("reasoning_content", "")
+        if reasoning:
+            events.append(
+                f"event: response.reasoning_text.delta\n"
+                f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'item_id': reasoning_item_id, 'output_index': 0, 'content_index': 0, 'delta': reasoning}, ensure_ascii=False)}\n\n"
+            )
+
         # Token de texte
         content = delta.get("content", "")
         if content:
             events.append(
                 f"event: response.output_text.delta\n"
-                f"data: {json.dumps({'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': content})}\n\n"
+                f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': message_item_id, 'output_index': 0, 'content_index': 0, 'delta': content}, ensure_ascii=False)}\n\n"
             )
 
-        # Fin du message
+        # Fin du contenu + fin de l'output item
+        # NOTE: ces événements sont émis depuis _handle_stream après la boucle,
+        # avec le texte complet accumulé. On ne les émet pas ici car on n'a pas
+        # le texte complet à ce stade.
         if finish_reason:
-            events.append(
-                f"event: response.output_item.done\n"
-                f"data: {json.dumps({'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'status': 'completed'}})}\n\n"
-            )
+            pass  # _handle_stream s'en charge
 
         # Tool calls en streaming
         tool_calls = delta.get("tool_calls", [])
@@ -377,15 +410,16 @@ class StreamTranslator:
             func = tc.get("function", {})
             name = func.get("name")
             args = func.get("arguments", "")
+            tc_id = tc.get("id", "")
             if name:
                 events.append(
                     f"event: response.function_call_arguments.done\n"
-                    f"data: {json.dumps({'item_id': tc.get('id', ''), 'name': name, 'arguments': args})}\n\n"
+                    f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'item_id': tc_id, 'output_index': 0, 'call_id': tc_id, 'name': name, 'arguments': args}, ensure_ascii=False)}\n\n"
                 )
             elif args:
                 events.append(
                     f"event: response.function_call_arguments.delta\n"
-                    f"data: {json.dumps({'item_id': tc.get('id', ''), 'delta': args})}\n\n"
+                    f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'item_id': tc_id, 'output_index': 0, 'delta': args}, ensure_ascii=False)}\n\n"
                 )
 
         return events
@@ -444,6 +478,8 @@ class ResponseStore:
 class ResponsesHandler(BaseHTTPRequestHandler):
     """Handler HTTP pour le proxy Responses API."""
 
+    protocol_version = "HTTP/1.1"
+
     # Référence vers l'adaptateur (set par le serveur)
     adapter: "ResponsesAdapter" = None
 
@@ -453,16 +489,101 @@ class ResponsesHandler(BaseHTTPRequestHandler):
             self.adapter._log(f"[ResponsesProxy] {args[0]}", *args[1:])
 
     def _send_json(self, status: int, data: dict):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(body)
 
     def _send_error_json(self, status: int, code: str, message: str):
         self._send_json(status, {
             "error": {"code": code, "message": message, "type": code},
         })
+
+    # --- Helpers pour émettre des événements SSE ---
+
+    def _emit_output_item_added(self, item_id: str, item_type: str, output_index: int, role: str = ""):
+        """Émet response.output_item.added."""
+        item: dict = {
+            "id": item_id, "object": "realtime.item",
+            "type": item_type, "status": "in_progress", "content": [],
+        }
+        if role:
+            item["role"] = role
+        event = json.dumps({
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": item,
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.output_item.added\ndata: {event}\n\n".encode("utf-8"))
+
+    def _emit_content_part_added(self, item_id: str, output_index: int, content_index: int, part_type: str):
+        """Émet response.content_part.added."""
+        event = json.dumps({
+            "type": "response.content_part.added",
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": content_index,
+            "part": {"type": part_type, "text": "", "annotations": []},
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.content_part.added\ndata: {event}\n\n".encode("utf-8"))
+
+    def _emit_content_part_done(self, item_id: str, output_index: int, content_index: int, part_type: str, text: str):
+        """Émet response.content_part.done."""
+        event = json.dumps({
+            "type": "response.content_part.done",
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": content_index,
+            "part": {"type": part_type, "text": text, "annotations": []},
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.content_part.done\ndata: {event}\n\n".encode("utf-8"))
+
+    def _emit_output_item_done(self, item_id: str, output_index: int, item_type: str, text: str, role: str = ""):
+        """Émet response.output_item.done."""
+        item: dict = {
+            "id": item_id, "object": "realtime.item",
+            "type": item_type, "status": "completed",
+            "content": [{"type": f"{item_type}_text" if item_type == "reasoning" else "output_text", "text": text, "annotations": []}],
+        }
+        if role:
+            item["role"] = role
+        event = json.dumps({
+            "type": "response.output_item.done",
+            "output_index": output_index,
+            "item": item,
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.output_item.done\ndata: {event}\n\n".encode("utf-8"))
+
+    def _proxy_get(self, path: str):
+        """Proxy une requête GET vers le serveur llama-server principal."""
+        try:
+            # Forwarder les headers d'auth du client
+            headers = {}
+            auth = self.headers.get("Authorization", "")
+            if auth:
+                headers["Authorization"] = auth
+            elif self.adapter.api_key:
+                headers["Authorization"] = f"Bearer {self.adapter.api_key}"
+
+            resp = requests.get(
+                self.adapter.chat_url.rsplit("/v1/", 1)[0] + path,
+                headers=headers,
+                timeout=10,
+            )
+            body = resp.content
+            self.send_response(resp.status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except requests.RequestException as e:
+            self._send_error_json(502, "proxy_error", f"Failed to reach upstream server: {e}")
 
     def do_OPTIONS(self):
         """CORS preflight."""
@@ -474,9 +595,62 @@ class ResponsesHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        self.adapter._log(f"[REQ] GET {parsed.path} from {self.client_address[0]}")
 
+        # GET / → info service
+        if parsed.path == "/" or parsed.path == "":
+            self._send_json(200, {
+                "object": "list",
+                "data": [
+                    {"id": "responses", "object": "endpoint", "url": "/v1/responses"},
+                    {"id": "models", "object": "endpoint", "url": "/v1/models"},
+                ],
+            })
+            return
+
+        # GET /health
         if parsed.path == "/health":
             self._send_json(200, {"status": "ok", "proxy": "ResponsesAdapter"})
+            return
+
+        # GET /logs → debug
+        if parsed.path == "/logs":
+            self._send_json(200, {"logs": self.adapter.logs})
+            return
+
+        # GET /v1 → endpoints disponibles
+        if parsed.path == "/v1" or parsed.path == "/v1/":
+            self._send_json(200, {
+                "object": "list",
+                "data": [
+                    {"object": "endpoint", "url": "/v1/responses", "methods": ["POST"]},
+                    {"object": "endpoint", "url": "/v1/responses/{id}", "methods": ["GET", "DELETE"]},
+                    {"object": "endpoint", "url": "/v1/models", "methods": ["GET"]},
+                ],
+            })
+            return
+
+        # GET /v1/responses → info (navigateur)
+        if parsed.path == "/v1/responses" or parsed.path == "/v1/responses/" or parsed.path == "/responses" or parsed.path == "/responses/":
+            self._send_json(200, {
+                "service": "ROCmFP4 Manager — OpenAI Responses API Adapter",
+                "version": "0.3.0",
+                "endpoint": "/v1/responses",
+                "method": "POST",
+                "docs": "https://platform.openai.com/docs/api-reference/responses",
+                "example": 'curl -X POST http://HOST:1413/v1/responses -H "Content-Type: application/json" -d \'{"model":"MODEL","input":"Hello"}\'',
+                "note": "This endpoint only accepts POST requests. Use a proper API client, not a browser."
+            })
+            return
+
+        # GET /v1/models → proxy vers le serveur principal
+        if parsed.path == "/v1/models":
+            self._proxy_get("/v1/models")
+            return
+
+        # Alias: GET /models → proxy (compatibilité clients qui n'utilisent pas /v1)
+        if parsed.path == "/models":
+            self._proxy_get("/v1/models")
             return
 
         # GET /v1/responses/{id}
@@ -508,8 +682,10 @@ class ResponsesHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        self.adapter._log(f"[REQ] POST {parsed.path} from {self.client_address[0]}")
 
-        if parsed.path != "/v1/responses":
+        # Accepter /v1/responses et /responses (alias)
+        if parsed.path != "/v1/responses" and parsed.path != "/responses":
             self._send_error_json(404, "not_found", f"Unknown endpoint: {parsed.path}")
             return
 
@@ -595,7 +771,6 @@ class ResponsesHandler(BaseHTTPRequestHandler):
     def _handle_stream(self, chat_body: dict, headers: dict, original_body: dict):
         """Gère une requête streaming avec traduction SSE."""
         response_id = _gen_response_id()
-        item_id = _gen_item_id("msg")
 
         try:
             resp = requests.post(
@@ -616,12 +791,25 @@ class ResponsesHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # Forcer UTF-8 : llama-server ne met pas toujours charset=utf-8 dans
+        # le header SSE, et requests décode alors en Latin-1 → double encodage.
+        resp.encoding = "utf-8"
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+
+        # IDs séparés pour reasoning et message (spec Responses API)
+        reasoning_item_id = _gen_item_id("rs")
+        message_item_id = _gen_item_id("msg")
+
+        # État du stream
+        reasoning_started = False   # output_item.added émis pour reasoning ?
+        reasoning_ended = False     # output_item.done émis pour reasoning ?
+        message_started = False     # output_item.added émis pour message ?
 
         # Événement initial: response.created
         created_event = json.dumps({
@@ -632,68 +820,165 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                 "status": "in_progress",
                 "output": [],
             },
-        })
-        self.wfile.write(f"event: response.created\ndata: {created_event}\n\n".encode())
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.created\ndata: {created_event}\n\n".encode("utf-8"))
         self.wfile.flush()
 
         # Événement: response.in_progress
-        self.wfile.write(
-            f"event: response.in_progress\n"
-            f"data: {json.dumps({'response': {'id': response_id, 'status': 'in_progress'}})}\n\n".encode()
-        )
+        in_progress_event = json.dumps({
+            "type": "response.in_progress",
+            "response": {"id": response_id, "object": "response", "status": "in_progress"},
+        }, ensure_ascii=False)
+        self.wfile.write(f"event: response.in_progress\ndata: {in_progress_event}\n\n".encode("utf-8"))
         self.wfile.flush()
 
-        # Événement: output item added
-        self.wfile.write(
-            f"event: response.output_item.added\n"
-            f"data: {json.dumps({'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'status': 'in_progress'}})}\n\n".encode()
-        )
-        self.wfile.flush()
-
-        # Événement: content part added
-        self.wfile.write(
-            f"event: response.content_part.added\n"
-            f"data: {json.dumps({'item_id': item_id, 'content_index': 0, 'part': {'type': 'output_text', 'text': '', 'annotations': []}})}\n\n".encode()
-        )
-        self.wfile.flush()
+        # On n'émet PAS les output_item.added/content_part.added upfront.
+        # Ils seront émis dynamiquement quand le premier delta arrive
+        # (reasoning → reasoning item, puis texte → message item).
 
         accumulated_text = ""
+        accumulated_reasoning = ""
 
         try:
             for line in resp.iter_lines(decode_unicode=True):
                 if line:
                     sse_events = StreamTranslator.translate_events(
-                        line, response_id, item_id, original_body
+                        line, reasoning_item_id, message_item_id
                     )
                     for event_str in sse_events:
-                        self.wfile.write(event_str.encode())
+                        # Détecter le type de delta pour gérer les transitions
+                        if "response.reasoning_text.delta" in event_str:
+                            if not reasoning_started:
+                                # Premier delta reasoning → créer l'item reasoning
+                                reasoning_started = True
+                                self._emit_output_item_added(reasoning_item_id, "reasoning", 0)
+                                self._emit_content_part_added(reasoning_item_id, 0, 0, "reasoning_text")
+                                self.wfile.flush()
+
+                        elif "response.output_text.delta" in event_str:
+                            if not message_started:
+                                # Fin du reasoning si actif
+                                if reasoning_started and not reasoning_ended:
+                                    reasoning_ended = True
+                                    self._emit_content_part_done(reasoning_item_id, 0, 0, "reasoning_text", accumulated_reasoning)
+                                    self._emit_output_item_done(reasoning_item_id, 0, "reasoning", accumulated_reasoning)
+                                # Créer l'item message
+                                message_started = True
+                                output_idx = 1 if reasoning_started else 0
+                                self._emit_output_item_added(message_item_id, "message", output_idx, role="assistant")
+                                self._emit_content_part_added(message_item_id, output_idx, 0, "output_text")
+                                self.wfile.flush()
+
+                        self.wfile.write(event_str.encode("utf-8"))
                         self.wfile.flush()
 
-                        # Accumuler le texte pour le stockage
+                        # Accumuler le texte
                         if "response.output_text.delta" in event_str:
                             try:
                                 delta_data = json.loads(event_str.split("\n")[1].replace("data: ", ""))
                                 accumulated_text += delta_data.get("delta", "")
                             except Exception:
                                 pass
+                        elif "response.reasoning_text.delta" in event_str:
+                            try:
+                                delta_data = json.loads(event_str.split("\n")[1].replace("data: ", ""))
+                                accumulated_reasoning += delta_data.get("delta", "")
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        # --- Événements de fin de stream (avec le texte complet accumulé) ---
+        try:
+            output_items = []
+
+            # Si le reasoning a été commencé mais pas terminé (fin de stream)
+            if reasoning_started and not reasoning_ended:
+                reasoning_ended = True
+                self._emit_content_part_done(reasoning_item_id, 0, 0, "reasoning_text", accumulated_reasoning)
+                self._emit_output_item_done(reasoning_item_id, 0, "reasoning", accumulated_reasoning)
+                self.wfile.flush()
+
+            # Si aucun message n'a été commencé (pas de output_text du tout)
+            if not message_started:
+                if accumulated_text:
+                    output_idx = 1 if reasoning_started else 0
+                    self._emit_output_item_added(message_item_id, "message", output_idx, role="assistant")
+                    self._emit_content_part_added(message_item_id, output_idx, 0, "output_text")
+                    self.wfile.flush()
+                message_started = True
+
+            # Ajouter l'item reasoning à l'output si présent
+            if reasoning_started:
+                output_items.append({
+                    "id": reasoning_item_id,
+                    "object": "realtime.item",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": accumulated_reasoning, "annotations": []}],
+                })
+
+            # Finaliser l'item message
+            msg_output_idx = 1 if reasoning_started else 0
+            self._emit_content_part_done(message_item_id, msg_output_idx, 0, "output_text", accumulated_text)
+            self._emit_output_item_done(message_item_id, msg_output_idx, "message", accumulated_text, role="assistant")
+            self.wfile.flush()
+
+            # Construire l'output pour response.completed
+            msg_item = {
+                "id": message_item_id,
+                "object": "realtime.item",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": accumulated_text, "annotations": []}],
+            }
+            output_items.append(msg_item)
+
+            # 3. response.completed
+            response_completed = json.dumps({
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "output": output_items,
+                    "output_text": accumulated_text,
+                    "usage": {"input_tokens": 0, "output_tokens": len(accumulated_text.split()), "total_tokens": 0},
+                },
+            }, ensure_ascii=False)
+            self.wfile.write(f"event: response.completed\ndata: {response_completed}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+            # 4. [DONE]
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
         except Exception:
             pass
 
         # Stocker la réponse complète si demandé
         store = original_body.get("store", True)
         if store:
-            output_item = {
-                "id": item_id,
+            stored_output = []
+            if reasoning_started:
+                stored_output.append({
+                    "id": reasoning_item_id,
+                    "type": "reasoning",
+                    "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": accumulated_reasoning, "annotations": []}],
+                })
+            stored_output.append({
+                "id": message_item_id,
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
                 "content": [{"type": "output_text", "text": accumulated_text, "annotations": [], "logprobs": []}],
-            }
+            })
             stored_response = {
                 "id": response_id,
                 "object": "response",
                 "status": "completed",
-                "output": [output_item],
+                "output": stored_output,
                 "output_text": accumulated_text,
                 "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             }
@@ -725,10 +1010,11 @@ class ResponsesAdapter:
     """
 
     def __init__(self, chat_url: str = "http://127.0.0.1:1412/v1/chat/completions",
-                  api_key: str = "", port: int = 1413):
+                  api_key: str = "", port: int = 1413, host: str = "127.0.0.1"):
         self.chat_url = chat_url
         self.api_key = api_key
         self.port = port
+        self.host = host
         self.store = ResponseStore()
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -759,21 +1045,37 @@ class ResponsesAdapter:
 
         ResponsesHandler.adapter = self
 
-        self._server = HTTPServer(("127.0.0.1", self.port), ResponsesHandler)
+        try:
+            self._server = ThreadingHTTPServer((self.host, self.port), ResponsesHandler)
+            self._server.allow_reuse_address = True
+        except OSError as e:
+            self._log(f"ResponsesAdapter FAILED to bind {self.host}:{self.port}: {e}")
+            self._running = False
+            return
+
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self._running = True
-        self._log(f"ResponsesAdapter started on http://127.0.0.1:{self.port}")
+        self._log(f"ResponsesAdapter started on http://{self.host}:{self.port}")
 
     def stop(self):
-        """Arrête le serveur proxy."""
-        if not self._running or not self._server:
-            return
-        self._server.shutdown()
-        self._thread.join(timeout=5)
+        """Arrête le serveur proxy (non-bloquant, force la fermeture)."""
         self._running = False
+        server = self._server
+        self._server = None
+        if server:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
         self._log("ResponsesAdapter stopped")
 
     @property
     def responses_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/v1/responses"
+        return f"http://{self.host}:{self.port}/v1/responses"

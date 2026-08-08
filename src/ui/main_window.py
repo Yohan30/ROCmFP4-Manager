@@ -112,6 +112,19 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.server.add_listener(self._on_server_event_threadsafe)
         self._server_signal.connect(self._on_server_event_ui)
+        # Quand un modèle est sélectionné dans l'onglet Models,
+        # mettre à jour le champ model_path du ConfigTab → déclenche le
+        # rechargement complet des paramètres spécifiques au modèle.
+        self.models_tab.model_selected.connect(self._on_model_selected_from_models_tab)
+
+    def _on_model_selected_from_models_tab(self, model_path: str):
+        """Met à jour le ConfigTab quand un modèle est sélectionné depuis Models."""
+        self.config_tab.model_path_input.setText(model_path)
+        # Forcer le rechargement immédiat (si le champ avait déjà la même valeur,
+        # textChanged ne serait pas émis)
+        self.config_tab._reload_model_specific_fields()
+        self.config_tab._load_model_args()
+        self.config_tab._update_model_label()
 
     def _on_server_event_threadsafe(self, event: str, data):
         self._server_signal.emit(event, data)

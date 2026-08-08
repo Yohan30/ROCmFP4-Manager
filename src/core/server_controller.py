@@ -180,7 +180,8 @@ class ServerController:
     @property
     def api_responses_url(self) -> str:
         """URL de l'endpoint Responses API (via l'adaptateur)."""
-        return f"http://127.0.0.1:{self._adapter_port}/v1/responses"
+        host = self.config.get("host", "127.0.0.1")
+        return f"http://{host}:{self._adapter_port}/v1/responses"
 
     @property
     def adapter_running(self) -> bool:
@@ -304,51 +305,49 @@ class ServerController:
             self._start_monitoring(log_file)
             self._notify("started", {"model": self._model_name, "pid": self.pid})
 
-            # Démarrer l'adaptateur Responses si le mode est activé
-            if self.config.get("api_mode", "chat_completions") == "responses":
-                threading.Timer(2.0, self.start_adapter).start()
+            # Démarrer l'adaptateur Responses API (toujours actif, coexiste avec Chat Completions)
+            threading.Timer(2.0, self.start_adapter).start()
 
         return success
 
     def _start_monitoring(self, log_file: Path):
-        """Thread de monitoring des logs et extraction des métriques."""
+        """Thread de monitoring des logs (lecture PIPE stdout) et extraction des métriques.
+
+        Lit directement le pipe stdout du processus (line-buffered) plutôt que
+        le fichier de log, pour éviter les problèmes de block-buffering.
+        """
 
         def monitor():
-            last_size = 0
-            token_patterns = ["tok/s", "tokens/s", "generation:"]
-            while self._running or self._proc.is_running:
-                try:
-                    if log_file.exists():
-                        current_size = log_file.stat().st_size
-                        if current_size > last_size:
-                            with open(log_file) as f:
-                                f.seek(last_size)
-                                new_lines = f.readlines()
-                                for line in new_lines:
-                                    line = line.strip()
-                                    if line:
-                                        self._log_buffer.append(line)
-                                        # Extraire tokens/s
-                                        for pat in token_patterns:
-                                            if pat in line.lower():
-                                                for word in line.split():
-                                                    try:
-                                                        val = float(word.replace(",", "."))
-                                                        if val > 0 and val < 1000:
-                                                            self._tokens_per_sec = val
-                                                    except ValueError:
-                                                        pass
-                                        self._notify("log", line)
-                            last_size = current_size
-                except (IOError, OSError):
-                    pass
-                time.sleep(0.2)
+            token_pattern = re.compile(
+                r'(?:tok/s|tokens/s|generation:)', re.IGNORECASE
+            )
+            stdout = self._proc.stdout
+            if stdout is None:
+                return  # pas de pipe disponible (processus adopté)
 
-                # Vérifier si le processus est mort
-                if not self._proc.is_running and self._running:
-                    self._running = False
-                    self._notify("stopped", None)
+            for line in stdout:
+                line = line.strip()
+                if line:
+                    self._log_buffer.append(line)
+                    # Extraire tokens/s
+                    if token_pattern.search(line):
+                        for word in line.split():
+                            try:
+                                val = float(word.replace(",", "."))
+                                if 0 < val < 1000:
+                                    self._tokens_per_sec = val
+                            except ValueError:
+                                pass
+                    self._notify("log", line)
+
+                if not self._running and not self._proc.is_running:
                     break
+
+            # Processus terminé
+            if self._running:
+                self._running = False
+                self._stop_adapter()
+                self._notify("stopped", None)
 
         self._monitor_thread = threading.Thread(target=monitor, daemon=True)
         self._monitor_thread.start()
@@ -436,6 +435,9 @@ class ServerController:
             self._start_monitoring(log_file)
             self._notify("started", {"model": self._model_name, "pid": self.pid})
 
+            # Démarrer l'adaptateur Responses API pour Lucebox aussi
+            threading.Timer(2.0, self.start_adapter).start()
+
         return success
 
     # ------------------------------------------------------------------
@@ -444,14 +446,17 @@ class ServerController:
 
     def start_adapter(self):
         """Démarre l'adaptateur Responses API (proxy vers Chat Completions)."""
-        if self._adapter and self._adapter.is_running:
-            return
+        # Toujours tuer l'ancien adaptateur d'abord (évite les zombies)
+        self._stop_adapter()
 
         api_key = self.config.get("api_key", "") if self.config.get("api_key_enabled", False) else ""
+        # Utiliser le host de la config pour l'adaptateur aussi
+        host = self.config.get("host", "127.0.0.1")
         self._adapter = ResponsesAdapter(
             chat_url=self.config.api_chat_url,
             api_key=api_key,
             port=self._adapter_port,
+            host=host,
         )
         self._adapter.start()
         self._notify("adapter_started", {"port": self._adapter_port})

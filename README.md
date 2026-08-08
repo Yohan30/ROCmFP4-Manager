@@ -15,7 +15,7 @@ Desktop GUI to **download, configure and run** GGUF models in **ROCmFP4** format
 - **Auto-start** — systemd service to launch the app and/or server at boot
 - **Theme support** — Dark/Light themes with customizable accent and background colors
 - **Auto-update** — Check and install new versions from GitHub releases
-- **OpenAI Responses API** — Built-in adapter (port 1413) translating `/v1/responses` to Chat Completions, with streaming, tool calls, and conversation state management
+- **OpenAI Responses API** — Built-in adapter (port 1413) translating `/v1/responses` to Chat Completions. Full streaming SSE with proper event types, separate reasoning/text output items, UTF-8 encoding, tool calls, `previous_response_id` state management. Compatible with Open WebUI and VS Code Copilot.
 - **DeepSeek V4 / Lucebox** — Auto-detection of DeepSeek V4 models, seamless launch via `dflash_server` with fused decode, expert routing, and speculative decoding options
 - **GPU Max Clock** — systemd service and script to set GPU to maximum clock for inference
 

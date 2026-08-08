@@ -23,8 +23,10 @@ class SettingsTab(QWidget):
         self.config = config
         self.autostart = autostart
         self.icon_path = icon_path
+        self._loading = True  # Flag pour éviter les popups au chargement initial
         self._setup_ui()
         self._load_settings()
+        self._loading = False
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -391,6 +393,8 @@ class SettingsTab(QWidget):
         self.config.save()
         from src.utils.i18n import set_language
         set_language(lang)
+        if self._loading:
+            return  # Ne pas afficher le popup pendant le chargement initial
         QMessageBox.information(
             self,
             "Language / Langue",

@@ -437,9 +437,46 @@ class ConfigTab(QWidget):
             self.adv_args_label.setText("")
 
     def _on_model_path_changed(self):
-        """Appelé quand le chemin du modèle change : recharge les args et met à jour le label."""
+        """Appelé quand le chemin du modèle change : recharge TOUS les paramètres
+        spécifiques au modèle (pas seulement les arguments avancés)."""
         self._load_model_args()
         self._update_model_label()
+        self._reload_model_specific_fields()
+
+    def _reload_model_specific_fields(self):
+        """Recharge tous les champs de l'UI depuis les paramètres du modèle
+        courant, sans toucher au champ model_path (évite la récursion)."""
+        model_path = self.model_path_input.text().strip()
+        g = lambda k, d: self.config.get_model_setting(model_path, k, d)
+
+        self.backend_combo.setCurrentText(g("backend", "Vulkan0"))
+        raw_ctx = str(int(g("context_size", 32768)))
+        self.ctx_input.setText(raw_ctx)
+        # Forcer la mise à jour du slider
+        try:
+            val = int(raw_ctx)
+            closest = min(range(len(self._ctx_steps)),
+                          key=lambda i: abs(self._ctx_steps[i] - val))
+            self.ctx_slider.blockSignals(True)
+            self.ctx_slider.setValue(closest)
+            self.ctx_slider.blockSignals(False)
+        except ValueError:
+            pass
+        self.batch_spin.setValue(int(g("batch_size", 2048)))
+        self.ubatch_spin.setValue(int(g("ubatch_size", 1024)))
+        self.gpu_layers_spin.setValue(int(g("gpu_layers", 999)))
+        self.flash_attn_check.setChecked(g("flash_attn", True))
+        self.no_kv_unified_check.setChecked(g("no_kv_unified", False))
+        self.env_gfx_check.setChecked(g("env_hsa_override_gfx", True))
+        self.env_umem_check.setChecked(g("env_unified_memory", True))
+        self.env_ldlib_check.setChecked(g("env_prepend_ld_library_path", True))
+        self.parallel_spin.setValue(int(g("parallel", 1)))
+        self.cache_k_combo.setCurrentText(g("cache_type_k", "q8_0"))
+        self.cache_v_combo.setCurrentText(g("cache_type_v", "q8_0"))
+        self.mtp_check.setChecked(g("mtp_enabled", False))
+        self.mtp_nmax_spin.setValue(int(g("mtp_n_max", 4)))
+        self.mtp_pmin_spin.setValue(int(g("mtp_p_min", 0.55) * 100))
+        self.mtp_psplit_spin.setValue(int(g("mtp_p_split", 0.10) * 100))
 
     def _load_model_args(self):
         """Load model-specific advanced arguments."""

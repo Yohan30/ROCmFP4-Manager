@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ class ProcessManager:
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
         self._log_file: Optional[Path] = None
+        self._writer_thread: Optional[threading.Thread] = None
         # Nettoyer un éventuel ancien serveur orphelin
         self._cleanup_orphan()
 
@@ -105,12 +107,12 @@ class ProcessManager:
             return False
 
         self._log_file = log_path
-        stdout = stderr = subprocess.PIPE
 
-        if log_path:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_file = open(log_path, "a")
-            stdout = stderr = log_file
+        # Toujours utiliser PIPE pour stdout afin d'éviter le block-buffering
+        # qui empêcherait la lecture des logs en temps réel quand stdout
+        # est redirigé vers un fichier (comportement par défaut de la libc).
+        stdout = subprocess.PIPE
+        stderr = subprocess.STDOUT  # fusionner stderr dans stdout
 
         try:
             self._process = subprocess.Popen(
@@ -120,7 +122,7 @@ class ProcessManager:
                 cwd=str(cwd) if cwd else None,
                 env=env,
                 text=True,
-                bufsize=1,
+                bufsize=1,  # line-buffered sur le PIPE
                 start_new_session=True,
             )
             # Sauvegarder le PID pour nettoyage inter-instances
@@ -129,6 +131,13 @@ class ProcessManager:
                 PID_FILE.write_text(str(self._process.pid))
             except OSError:
                 pass
+
+            # Thread écrivain : lit le PIPE ligne par ligne et écrit
+            # dans le fichier de log avec flush immédiat (si log_path).
+            if log_path:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._start_pipe_writer(log_path)
+
             return True
         except FileNotFoundError as e:
             raise FileNotFoundError(
@@ -165,11 +174,40 @@ class ProcessManager:
                 pass
 
         self._process = None
+        self._writer_thread = None
         # Nettoyer le fichier PID
         try:
             PID_FILE.unlink(missing_ok=True)
         except OSError:
             pass
+
+    @property
+    def stdout(self):
+        """Retourne le pipe stdout du processus (None si pas démarré ou adopté)."""
+        if self._process and not getattr(self._process, '_adopted', False):
+            return self._process.stdout
+        return None
+
+    def _start_pipe_writer(self, log_path: Path):
+        """Démarre un thread daemon qui lit le PIPE stdout et écrit dans
+        le fichier de log avec flush immédiat à chaque ligne.
+
+        Ceci résout le problème de block-buffering : quand stdout est un
+        fichier (pas un terminal), la libc bufferise par blocs de 4-8 Ko.
+        En passant par un PIPE (line-buffered) puis en flushant dans le
+        fichier, les logs sont visibles en temps réel.
+        """
+        def _writer():
+            try:
+                with open(log_path, "a", buffering=1) as log_f:
+                    for line in self._process.stdout:
+                        log_f.write(line)
+                        log_f.flush()
+            except (ValueError, OSError):
+                pass  # pipe fermé, processus terminé
+
+        self._writer_thread = threading.Thread(target=_writer, daemon=True)
+        self._writer_thread.start()
 
     def read_output(self) -> str:
         """Lit la sortie capturée (mode PIPE uniquement)."""
