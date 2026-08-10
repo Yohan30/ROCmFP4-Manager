@@ -457,6 +457,8 @@ class ServerController:
             api_key=api_key,
             port=self._adapter_port,
             host=host,
+            template_path=self.config.get("chat_template", ""),
+            bailing_format=self.config.get("bailing_format", False),
         )
         self._adapter.start()
         self._notify("adapter_started", {"port": self._adapter_port})

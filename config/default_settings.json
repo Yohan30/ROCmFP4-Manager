@@ -1,6 +1,7 @@
 {
   "rocmfpx_path": "",
   "rocmfpx_active_profile": "charlie-main",
+  "bailing_format": false,
   "rocmfpx_profiles": {
     "charlie-main": {
       "repo_url": "https://github.com/charlie12345/ROCmFPX.git",

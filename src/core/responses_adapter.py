@@ -353,11 +353,10 @@ class StreamTranslator:
     """Convertit un flux SSE Chat Completions en flux SSE Responses."""
 
     @staticmethod
-    def translate_events(chat_sse_line: str, reasoning_item_id: str,
+    def translate_events(chat_sse_line: str, item_id: str,
                           message_item_id: str) -> list[str]:
         """Traduit une ligne SSE Chat Completions en événements Responses.
-
-        Retourne une liste de chaînes SSE à envoyer.
+        item_id et message_item_id sont fusionnés (plus d'item reasoning séparé).
         """
         if not chat_sse_line.startswith("data: "):
             return []
@@ -386,7 +385,7 @@ class StreamTranslator:
         if reasoning:
             events.append(
                 f"event: response.reasoning_text.delta\n"
-                f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'item_id': reasoning_item_id, 'output_index': 0, 'content_index': 0, 'delta': reasoning}, ensure_ascii=False)}\n\n"
+                f"data: {json.dumps({'type': 'response.reasoning_text.delta', 'item_id': message_item_id, 'output_index': 0, 'content_index': 0, 'delta': reasoning}, ensure_ascii=False)}\n\n"
             )
 
         # Token de texte
@@ -558,10 +557,143 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         }, ensure_ascii=False)
         self.wfile.write(f"event: response.output_item.done\ndata: {event}\n\n".encode("utf-8"))
 
+    def _format_bailing_tools(self, tools: list) -> str:
+        """Formate les définitions d'outils au format Bailing V3 (<tools> XML)."""
+        xml_parts = ["\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"]
+        xml_parts.append("You are provided with function signatures within <tools></tools> XML tags:\n<tools>")
+        for tool in tools:
+            func = tool.get("function", tool)
+            xml_parts.append("\n" + json.dumps({
+                "name": func.get("name", ""),
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters", {}),
+            }, ensure_ascii=False))
+        xml_parts.append("\n</tools>\n\n")
+        xml_parts.append("If none of the functions can be used, point it out. If the given question lacks ")
+        xml_parts.append("the parameters required by the function, also point it out.\n")
+        xml_parts.append("If you need to use a function, for each function call, output the function name ")
+        xml_parts.append("and arguments within the following XML format:\n")
+        xml_parts.append("<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n")
+        xml_parts.append("<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call>\n")
+        return "".join(xml_parts)
+
+    @staticmethod
+    def _parse_bailing_tool_calls(text: str) -> list[dict]:
+        """Parse les <tool_call> XML non-standard de la réponse.
+        
+        Supporte deux formats :
+        1. Bailing V3 (Ling 3.0) : <tool_call>name\n<arg_key>k</arg_key>\n<arg_value>v</arg_value>\n</tool_call>
+        2. Step 3.7 Native : <tool_call>\n<function=name>\n<parameter=p>\nv\n</parameter>\n</function>\n</tool_call>
+        """
+        import re
+        tool_calls = []
+        
+        # Format 1: Bailing V3 (arg_key/arg_value)
+        pattern1 = r'<tool_call>([^\n<]+)\n(.*?)</tool_call>'
+        for match in re.finditer(pattern1, text, re.DOTALL):
+            name = match.group(1).strip()
+            args_block = match.group(2)
+            if '<arg_key>' in args_block:
+                arguments = {}
+                arg_pattern = r'<arg_key>(.*?)</arg_key>\s*\n\s*<arg_value>(.*?)</arg_value>'
+                for am in re.finditer(arg_pattern, args_block, re.DOTALL):
+                    key = am.group(1).strip()
+                    value = am.group(2).strip()
+                    try:
+                        value = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    arguments[key] = value
+                if name:  # skip empty names
+                    tool_calls.append({
+                        "id": _gen_item_id("fc"),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments, ensure_ascii=False),
+                        },
+                    })
+        
+        # Format 2: Step 3.7 Native (function=/parameter=)
+        pattern2 = r'<tool_call>\s*\n\s*<function=([^>]+)>\s*\n(.*?)</function>\s*\n\s*</tool_call>'
+        for match in re.finditer(pattern2, text, re.DOTALL):
+            name = match.group(1).strip()
+            params_block = match.group(2)
+            arguments = {}
+            param_pattern = r'<parameter=([^>]+)>\s*\n(.*?)</parameter>'
+            for pm in re.finditer(param_pattern, params_block, re.DOTALL):
+                key = pm.group(1).strip()
+                value = pm.group(2).strip()
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                arguments[key] = value
+            if name:
+                tool_calls.append({
+                    "id": _gen_item_id("fc"),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                })
+        
+        # Format 3: Step 3.7 réel (<tool_call><name>...</name></tool_call>)
+        pattern3 = r'<tool_call><(\w+)>(.*?)</\1>\s*</tool_call>'
+        for match in re.finditer(pattern3, text, re.DOTALL):
+            name = match.group(1).strip()
+            params_block = match.group(2)
+            arguments = {}
+            param_pattern = r'<(\w+)>(.*?)</\1>'
+            for pm in re.finditer(param_pattern, params_block, re.DOTALL):
+                key = pm.group(1).strip()
+                value = pm.group(2).strip()
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                arguments[key] = value
+            if name:
+                tool_calls.append({
+                    "id": _gen_item_id("fc"),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                })
+
+        # Format 4: Step 3.7 réel v2 (<tool_call><function-name>...</function-name></tool_call>)
+        pattern4 = r'<tool_call><function-(\w+)>(.*?)</function-\1>\s*</tool_call>'
+        for match in re.finditer(pattern4, text, re.DOTALL):
+            name = match.group(1).strip()
+            params_block = match.group(2)
+            arguments = {}
+            param_pattern = r'<arg-(\w+)>(.*?)</arg-\1>'
+            for pm in re.finditer(param_pattern, params_block, re.DOTALL):
+                key = pm.group(1).strip()
+                value = pm.group(2).strip()
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                arguments[key] = value
+            if name:
+                tool_calls.append({
+                    "id": _gen_item_id("fc"),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                })
+
+        return tool_calls
+
     def _proxy_get(self, path: str):
         """Proxy une requête GET vers le serveur llama-server principal."""
         try:
-            # Forwarder les headers d'auth du client
             headers = {}
             auth = self.headers.get("Authorization", "")
             if auth:
@@ -575,7 +707,29 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                 timeout=10,
             )
             body = resp.content
-            self.send_response(resp.status_code)
+            status = resp.status_code
+
+            # Traduire le format /models de llama-server → format OpenAI
+            if status == 200 and path == "/v1/models":
+                try:
+                    llama_data = resp.json()
+                    openai_models = []
+                    for m in llama_data.get("models", llama_data.get("data", [])):
+                        name = m.get("name", m.get("id", ""))
+                        openai_models.append({
+                            "id": name,
+                            "object": "model",
+                            "created": m.get("created") or int(time.time()),
+                            "owned_by": m.get("owned_by", "llamacpp"),
+                        })
+                    body = json.dumps({
+                        "object": "list",
+                        "data": openai_models,
+                    }, ensure_ascii=False).encode("utf-8")
+                except Exception:
+                    pass
+
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -584,6 +738,52 @@ class ResponsesHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except requests.RequestException as e:
             self._send_error_json(502, "proxy_error", f"Failed to reach upstream server: {e}")
+
+    def _proxy_post(self, path: str):
+        """Proxy une requête POST vers llama-server (Chat Completions passthrough)."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+
+            headers = {"Content-Type": "application/json"}
+            auth = self.headers.get("Authorization", "")
+            if auth:
+                headers["Authorization"] = auth
+            elif self.adapter.api_key:
+                headers["Authorization"] = f"Bearer {self.adapter.api_key}"
+
+            resp = requests.post(
+                self.adapter.chat_url.rsplit("/v1/", 1)[0] + path,
+                data=body,
+                headers=headers,
+                stream=True,
+                timeout=300,
+            )
+
+            if resp.status_code != 200:
+                self.send_response(resp.status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp.content)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(resp.content)
+                return
+
+            # Streaming passthrough (SSE)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            for line in resp.iter_lines(decode_unicode=False):
+                if line:
+                    self.wfile.write(line + b"\n")
+                    self.wfile.flush()
+        except requests.RequestException as e:
+            self._send_error_json(502, "proxy_error", f"Failed: {e}")
 
     def do_OPTIONS(self):
         """CORS preflight."""
@@ -684,6 +884,25 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         self.adapter._log(f"[REQ] POST {parsed.path} from {self.client_address[0]}")
 
+        try:
+            self._do_post_inner(parsed)
+        except Exception as e:
+            import traceback
+            self.adapter._log(f"[ERROR] do_POST crashed: {e}\n{traceback.format_exc()}")
+            try:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            except Exception:
+                pass
+
+    def _do_post_inner(self, parsed):
+        # Passthrough Chat Completions → proxy direct vers llama-server
+        if parsed.path == "/v1/chat/completions" or parsed.path == "/chat/completions":
+            self._proxy_post("/v1/chat/completions")
+            return
+
         # Accepter /v1/responses et /responses (alias)
         if parsed.path != "/v1/responses" and parsed.path != "/responses":
             self._send_error_json(404, "not_found", f"Unknown endpoint: {parsed.path}")
@@ -711,6 +930,24 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_error_json(400, "invalid_request", f"Failed to translate request: {e}")
             return
+
+        # Bailing V3 workaround : le template formate les outils en XML,
+        # mais llama.cpp impose une grammaire JSON native → conflit.
+        # On retire "tools" du body Chat Completions (le template s'en charge)
+        # et on les injecte dans le message système pour le modèle.
+        # Peut être activé globalement (config) ou par requête (body.bailing_format).
+        use_bailing = self.adapter.bailing_format or body.get("bailing_format", False)
+        if use_bailing and "tools" in chat_body:
+            bailing_tools = chat_body.pop("tools", [])
+            chat_body.pop("tool_choice", None)
+            # Injecter les définitions d'outils dans le message système
+            if bailing_tools:
+                tools_xml = self._format_bailing_tools(bailing_tools)
+                sys_msg = chat_body.get("messages", [{}])[0]
+                if sys_msg.get("role") == "system":
+                    sys_msg["content"] = sys_msg.get("content", "") + tools_xml
+                else:
+                    chat_body["messages"].insert(0, {"role": "system", "content": tools_xml})
 
         # Auth header à propager
         auth_header = self.headers.get("Authorization", "")
@@ -760,6 +997,23 @@ class ResponsesHandler(BaseHTTPRequestHandler):
             self._send_error_json(500, "translation_error", f"Failed to translate response: {e}")
             return
 
+        # Bailing V3: parser les <tool_call> XML dans la réponse
+        use_bailing = self.adapter.bailing_format or original_body.get("bailing_format", False)
+        if use_bailing:
+            raw_text = ResponseTranslator._extract_text(responses_resp.get("output", []))
+            bailing_calls = self._parse_bailing_tool_calls(raw_text)
+            if bailing_calls:
+                # Ajouter les function_call au tableau output
+                for fc in bailing_calls:
+                    responses_resp["output"].append({
+                        "id": fc["id"],
+                        "type": "function_call",
+                        "call_id": fc.get("call_id", fc["id"]),
+                        "name": fc["function"]["name"],
+                        "arguments": fc["function"]["arguments"],
+                        "status": "completed",
+                    })
+
         # Stocker pour previous_response_id
         store = original_body.get("store", True)
         if store:
@@ -802,14 +1056,8 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
-        # IDs séparés pour reasoning et message (spec Responses API)
-        reasoning_item_id = _gen_item_id("rs")
-        message_item_id = _gen_item_id("msg")
-
-        # État du stream
-        reasoning_started = False   # output_item.added émis pour reasoning ?
-        reasoning_ended = False     # output_item.done émis pour reasoning ?
-        message_started = False     # output_item.added émis pour message ?
+        # ID unique pour le message (reasoning émis inline comme output_text)
+        item_id = _gen_item_id("msg")
 
         # Événement initial: response.created
         created_event = json.dumps({
@@ -832,108 +1080,62 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"event: response.in_progress\ndata: {in_progress_event}\n\n".encode("utf-8"))
         self.wfile.flush()
 
-        # On n'émet PAS les output_item.added/content_part.added upfront.
-        # Ils seront émis dynamiquement quand le premier delta arrive
-        # (reasoning → reasoning item, puis texte → message item).
+        # Un seul output_item (message) — reasoning sera inline dans le texte
+        self._emit_output_item_added(item_id, "message", 0, role="assistant")
+        self._emit_content_part_added(item_id, 0, 0, "output_text")
+        self.wfile.flush()
 
         accumulated_text = ""
-        accumulated_reasoning = ""
 
         try:
             for line in resp.iter_lines(decode_unicode=True):
                 if line:
                     sse_events = StreamTranslator.translate_events(
-                        line, reasoning_item_id, message_item_id
+                        line, item_id, item_id
                     )
                     for event_str in sse_events:
-                        # Détecter le type de delta pour gérer les transitions
-                        if "response.reasoning_text.delta" in event_str:
-                            if not reasoning_started:
-                                # Premier delta reasoning → créer l'item reasoning
-                                reasoning_started = True
-                                self._emit_output_item_added(reasoning_item_id, "reasoning", 0)
-                                self._emit_content_part_added(reasoning_item_id, 0, 0, "reasoning_text")
-                                self.wfile.flush()
-
-                        elif "response.output_text.delta" in event_str:
-                            if not message_started:
-                                # Fin du reasoning si actif
-                                if reasoning_started and not reasoning_ended:
-                                    reasoning_ended = True
-                                    self._emit_content_part_done(reasoning_item_id, 0, 0, "reasoning_text", accumulated_reasoning)
-                                    self._emit_output_item_done(reasoning_item_id, 0, "reasoning", accumulated_reasoning)
-                                # Créer l'item message
-                                message_started = True
-                                output_idx = 1 if reasoning_started else 0
-                                self._emit_output_item_added(message_item_id, "message", output_idx, role="assistant")
-                                self._emit_content_part_added(message_item_id, output_idx, 0, "output_text")
-                                self.wfile.flush()
-
                         self.wfile.write(event_str.encode("utf-8"))
                         self.wfile.flush()
 
-                        # Accumuler le texte
                         if "response.output_text.delta" in event_str:
                             try:
                                 delta_data = json.loads(event_str.split("\n")[1].replace("data: ", ""))
                                 accumulated_text += delta_data.get("delta", "")
                             except Exception:
                                 pass
-                        elif "response.reasoning_text.delta" in event_str:
-                            try:
-                                delta_data = json.loads(event_str.split("\n")[1].replace("data: ", ""))
-                                accumulated_reasoning += delta_data.get("delta", "")
-                            except Exception:
-                                pass
         except Exception:
             pass
 
-        # --- Événements de fin de stream (avec le texte complet accumulé) ---
+        # --- Événements de fin de stream ---
         try:
-            output_items = []
-
-            # Si le reasoning a été commencé mais pas terminé (fin de stream)
-            if reasoning_started and not reasoning_ended:
-                reasoning_ended = True
-                self._emit_content_part_done(reasoning_item_id, 0, 0, "reasoning_text", accumulated_reasoning)
-                self._emit_output_item_done(reasoning_item_id, 0, "reasoning", accumulated_reasoning)
-                self.wfile.flush()
-
-            # Si aucun message n'a été commencé (pas de output_text du tout)
-            if not message_started:
-                if accumulated_text:
-                    output_idx = 1 if reasoning_started else 0
-                    self._emit_output_item_added(message_item_id, "message", output_idx, role="assistant")
-                    self._emit_content_part_added(message_item_id, output_idx, 0, "output_text")
-                    self.wfile.flush()
-                message_started = True
-
-            # Ajouter l'item reasoning à l'output si présent
-            if reasoning_started:
-                output_items.append({
-                    "id": reasoning_item_id,
-                    "object": "realtime.item",
-                    "type": "reasoning",
-                    "status": "completed",
-                    "content": [{"type": "reasoning_text", "text": accumulated_reasoning, "annotations": []}],
-                })
-
-            # Finaliser l'item message
-            msg_output_idx = 1 if reasoning_started else 0
-            self._emit_content_part_done(message_item_id, msg_output_idx, 0, "output_text", accumulated_text)
-            self._emit_output_item_done(message_item_id, msg_output_idx, "message", accumulated_text, role="assistant")
+            # Finaliser le message (plus d'item reasoning séparé)
+            self._emit_content_part_done(item_id, 0, 0, "output_text", accumulated_text)
+            self._emit_output_item_done(item_id, 0, "message", accumulated_text, role="assistant")
             self.wfile.flush()
 
             # Construire l'output pour response.completed
             msg_item = {
-                "id": message_item_id,
+                "id": item_id,
                 "object": "realtime.item",
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": accumulated_text, "annotations": []}],
             }
-            output_items.append(msg_item)
+
+            # Bailing V3: parser les <tool_call> dans le texte accumulé
+            use_bailing = self.adapter.bailing_format or original_body.get("bailing_format", False)
+            if use_bailing and accumulated_text:
+                bailing_calls = self._parse_bailing_tool_calls(accumulated_text)
+                for fc in bailing_calls:
+                    output_items.append({
+                        "id": fc["id"],
+                        "type": "function_call",
+                        "call_id": fc.get("call_id", fc["id"]),
+                        "name": fc["function"]["name"],
+                        "arguments": fc["function"]["arguments"],
+                        "status": "completed",
+                    })
 
             # 3. response.completed
             response_completed = json.dumps({
@@ -942,7 +1144,7 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                     "id": response_id,
                     "object": "response",
                     "status": "completed",
-                    "output": output_items,
+                    "output": [msg_item],
                     "output_text": accumulated_text,
                     "usage": {"input_tokens": 0, "output_tokens": len(accumulated_text.split()), "total_tokens": 0},
                 },
@@ -959,21 +1161,13 @@ class ResponsesHandler(BaseHTTPRequestHandler):
         # Stocker la réponse complète si demandé
         store = original_body.get("store", True)
         if store:
-            stored_output = []
-            if reasoning_started:
-                stored_output.append({
-                    "id": reasoning_item_id,
-                    "type": "reasoning",
-                    "status": "completed",
-                    "content": [{"type": "reasoning_text", "text": accumulated_reasoning, "annotations": []}],
-                })
-            stored_output.append({
-                "id": message_item_id,
+            stored_output = [{
+                "id": item_id,
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
                 "content": [{"type": "output_text", "text": accumulated_text, "annotations": [], "logprobs": []}],
-            })
+            }]
             stored_response = {
                 "id": response_id,
                 "object": "response",
@@ -1010,16 +1204,22 @@ class ResponsesAdapter:
     """
 
     def __init__(self, chat_url: str = "http://127.0.0.1:1412/v1/chat/completions",
-                  api_key: str = "", port: int = 1413, host: str = "127.0.0.1"):
+                  api_key: str = "", port: int = 1413, host: str = "127.0.0.1",
+                  template_path: str = "", bailing_format: bool = False):
         self.chat_url = chat_url
         self.api_key = api_key
         self.port = port
         self.host = host
+        self.template_path = template_path
+        self.bailing_format = bailing_format
         self.store = ResponseStore()
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._logs: list[str] = []
+
+        if self.bailing_format:
+            self._log("Bailing/XML tool format ENABLED (config)")
 
     def _log(self, msg: str, *args):
         try:
