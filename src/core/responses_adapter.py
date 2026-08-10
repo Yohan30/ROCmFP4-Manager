@@ -75,6 +75,12 @@ class RequestTranslator:
         if "top_p" in responses_body:
             chat_body["top_p"] = responses_body["top_p"]
 
+        # --- Paramètres supplémentaires (pass-through) ---
+        for key in ("top_k", "min_p", "frequency_penalty", "presence_penalty",
+                     "repetition_penalty", "seed", "stop"):
+            if key in responses_body:
+                chat_body[key] = responses_body[key]
+
         # --- stream ---
         if "stream" in responses_body:
             chat_body["stream"] = responses_body["stream"]
