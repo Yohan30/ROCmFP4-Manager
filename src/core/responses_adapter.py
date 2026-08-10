@@ -716,11 +716,14 @@ class ResponsesHandler(BaseHTTPRequestHandler):
                     openai_models = []
                     for m in llama_data.get("models", llama_data.get("data", [])):
                         name = m.get("name", m.get("id", ""))
+                        meta = m.get("meta", {})
                         openai_models.append({
                             "id": name,
                             "object": "model",
                             "created": m.get("created") or int(time.time()),
                             "owned_by": m.get("owned_by", "llamacpp"),
+                            "context_length": meta.get("n_ctx", 128000),
+                            "max_output_tokens": meta.get("n_ctx", 128000),
                         })
                     body = json.dumps({
                         "object": "list",
